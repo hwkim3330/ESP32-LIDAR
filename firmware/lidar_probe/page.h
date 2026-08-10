@@ -93,7 +93,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;colo
 
 <div class="card chart">
   <h2>Distribution of gaps</h2>
-  <p class="cap">How tightly the sensor is actually spaced &mdash; a second lump means something is bunching packets.</p>
+  <p class="cap">How tightly the sensor is actually spaced &mdash; a second lump means something is bunching packets.<span id="clip"></span></p>
   <canvas id="c-hist"></canvas>
 </div>
 
@@ -255,9 +255,13 @@ async function tick(){
   // real bar into the leftmost bin.
   if(gaps.length){
     const lo=l.min, hi=Math.max(l.p99,lo+1), bins=48, counts=new Array(bins).fill(0);
+    // Anything past p99 is dropped rather than piled into the last bin: a clamp there draws a
+    // bar that looks exactly like the second lump this chart exists to reveal.
+    let clipped=0;
     gaps.forEach(g=>{const b=Math.floor((g-lo)/(hi-lo)*bins);
-      if(b>=0&&b<bins)counts[b]++; else if(g>=hi)counts[bins-1]++;});
+      if(b>=0&&b<bins)counts[b]++; else clipped++;});
     bars($('#c-hist'),counts,[lo,hi]);
+    $('#clip').textContent=clipped?(' '+clipped+' of '+gaps.length+' gaps fall past p99 and are not drawn.'):'';
   }
 
   const tb=$('#tbl').querySelector('tbody');tb.innerHTML='';
