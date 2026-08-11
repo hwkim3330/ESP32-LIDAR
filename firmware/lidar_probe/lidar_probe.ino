@@ -25,6 +25,7 @@
 #include <WiFi.h>
 
 #include "page.h"
+#include "switch_probe.h"
 
 constexpr int kSck = 48, kMosi = 21, kCs = 45, kMiso = 47;
 
@@ -58,6 +59,13 @@ uint16_t scanPort = 0;
 // With it the sensor is always at kSensorAddress and the ESP can drive it alone.
 NetworkUDP dhcpUdp;
 char discovered[96] = "";
+
+// The switch in the path, on the address keti-reconfig gave it. Asked, not assumed: the bench
+// has had both a LAN9662 and a LAN9692 on it and the catalog checksum says which is here now.
+const IPAddress kSwitchAddress(192, 168, 1, 10);
+NetworkUDP coapUdp;
+uint16_t coapMessageId = 1;
+String switchCatalog = "";
 const IPAddress kSensorAddress(192, 168, 1, 50);
 uint8_t sensorMac[6] = {0};
 bool sensorLeased = false;
@@ -342,6 +350,7 @@ void setup() {
   lidarUdp.begin(kLidarPort);
   imuUdp.begin(kImuPort);
   dhcpUdp.begin(67);
+  coapUdp.begin(5684);  // any local port; the switch answers to wherever it came from
 
   server.on("/", []() { server.send_P(200, "text/html", kPage); });
   server.on("/api/stats", handleStats);
@@ -549,8 +558,18 @@ void handleConsole() {
       }
       break;
     }
+    case 's': {
+      Serial.printf("asking the switch at %s for its catalog checksum...\n",
+                    kSwitchAddress.toString().c_str());
+      switchCatalog = fetchCatalogChecksum(coapUdp, kSwitchAddress, coapMessageId);
+      if (switchCatalog.length())
+        Serial.printf("  %s -> %s\n", switchCatalog.c_str(), nameForCatalog(switchCatalog));
+      else
+        Serial.println("  no answer");
+      break;
+    }
     case '?':
-      Serial.println("i=info  g<path>=GET  c=512x10 low-rate  C=1024x10 full  r=reset");
+      Serial.println("i=info  g<path>=GET  s=switch catalog  c=512x10  C=1024x10  r=reset");
       break;
     default:
       break;

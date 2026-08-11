@@ -77,6 +77,21 @@ accepts every request with `HTTP 204`. Ouster's first suspect for this alert is 
 OS1 draws 14–20 W and surges at motor spin-up, and a marginal supply produces exactly this. The
 cabling was disturbed between the working run and this one.
 
+## The board talks to both ends
+
+The switch is asked, not assumed. One CoAP request does it, and it is the only one that can come
+first: the YANG catalog checksum is the single node whose SID is knowable without already having
+that catalog's SID table (29304, fixed). The bench has carried both a LAN9662 and a LAN9692, and
+the answer says which is here:
+
+```
+s  ->  5151bae07677b1501f9cf52637f2a38f  ->  LAN9662 (54 YANG / 54 SID)
+```
+
+Everything past that — port counters, gate schedules — needs a SID table generated for *that*
+catalog, so nothing else honestly comes first. keti-reconfig's table is for the LAN9692 and does
+not apply here.
+
 ## The UI rides WiFi
 
 The measurement path is Ethernet; the page is served over the S3's own soft AP, so a phone,
@@ -98,6 +113,7 @@ rather than something the board does on its own.
 |---|---|
 | `i` | ask the sensor what it is |
 | `g<path>` | GET any path on the sensor, printed whole — `g/api/v1/sensor/alerts` |
+| `s` | ask the switch for its catalog checksum |
 | `c` | 512x10, low data rate, `udp_dest` → this board |
 | `C` | 1024x10, full profile — 34 Mbit/s, expect loss |
 | `r` | clear counters |
