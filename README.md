@@ -436,6 +436,22 @@ So: the board's counts and rates are trustworthy, and for microsecond jitter the
 reference. It matters for what can be measured of TAS — a 12 ms effect is plain in the board's
 numbers, a 200 µs one is only visible on the tap.
 
+### A table of what schedules actually do — `docs/tas-sweep.md`
+
+Eight schedules, applied and measured at the receiver, and the physics comes out clean:
+
+- **The mean never moves** — 3134 µs in every row that keeps its packets. Shaping changes when,
+  not how much.
+- **The worst gap is the cycle**: 10 ms → 12.0, 20 ms → 20.0, 50 ms → 45.2. The longest wait a
+  schedule can impose is its own period.
+- **Long gaps come one per cycle**: 100/s at 10 ms, 50/s at 20 ms, 20/s at 50 ms — 1000 over the
+  cycle in milliseconds, exactly.
+- **Loss begins when the closed window passes about 10 ms.** 15 ms closed drops 6%, 25 ms drops
+  44%, which puts **this port's queue for the class at four to eight frames** — a property of the
+  switch measured without reading anything from the switch.
+
+`tools/sweep.py` runs it; `docs/tas-sweep.md` has the table and the reading.
+
 ### Decide from the traffic — `tools/shape.py`
 
 The switch's account of itself was misread four times in one day, always the same way: as a
