@@ -16,7 +16,6 @@
 // Pinout is from keti-reconfig's exhaustive bit-banged search, not a datasheet. Do not change
 // it casually: seven published pinouts for this board were all wrong.
 #include <Arduino.h>
-#include <ETH.h>
 #include <HTTPClient.h>
 #include <NetworkUdp.h>
 #include <Preferences.h>
@@ -24,6 +23,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 
+#include "eth_w5500.h"
 #include "page.h"
 #include "switch_link.h"
 
@@ -96,6 +96,7 @@ int64_t quietSince = 0;
 // The page has to serve to something. The PC on this bench has one NIC and it is committed to
 // the office network, so the UI rides the S3's WiFi as a soft AP: any phone, tablet or laptop
 // joins it directly and the Ethernet side stays purely the measurement path.
+bool apRunning = true;
 const char *kApSsid = "KETI-LIDAR";
 const char *kApPassword = "ketilidar";
 
@@ -136,9 +137,21 @@ struct HistoryBucket {
   uint32_t maxInterval = 0;
   uint32_t meanInterval = 0;
 };
+
+// One outlier a second says something happens once a second. Thirty say the stream is ragged
+// throughout. The single worst gap cannot tell those apart, and they have different causes.
+constexpr uint32_t kOutlierThresholdUs = 6250;  // twice the nominal spacing
+uint32_t bucketOutliers = 0, bucketMinInterval = UINT32_MAX;
+uint32_t lastOutliers = 0, lastMinInterval = 0;
 HistoryBucket history[kHistory];
 int historyHead = 0;
 int64_t bucketStart = 0;
+int64_t housekeepingUs = 0;
+
+// Where a loop pass spends its time, worst case per second. If one section owns the stall it is
+// this code's fault; if the worst pass lands in whichever section happened to be running, the
+// loop was preempted and the fault is another task.
+int64_t worstDrain = 0, worstServe = 0, worstPass = 0;
 uint32_t bucketPackets = 0;
 uint64_t bucketIntervalSum = 0;
 uint32_t bucketIntervalMax = 0;
@@ -165,6 +178,8 @@ void recordArrival(Flow &s, int size, const IPAddress &from, uint16_t fromPort, 
       if (timed) {
         bucketIntervalSum += interval;
         if (interval > bucketIntervalMax) bucketIntervalMax = interval;
+        if (interval > kOutlierThresholdUs) bucketOutliers++;
+        if (interval < bucketMinInterval) bucketMinInterval = interval;
       }
     }
   }
@@ -177,9 +192,13 @@ void closeBucket() {
   history[historyHead].maxInterval = bucketIntervalMax;
   history[historyHead].meanInterval = bucketPackets > 1 ? uint32_t(bucketIntervalSum / (bucketPackets - 1)) : 0;
   historyHead = (historyHead + 1) % kHistory;
+  lastOutliers = bucketOutliers;
+  lastMinInterval = bucketMinInterval == UINT32_MAX ? 0 : bucketMinInterval;
   bucketPackets = 0;
   bucketIntervalSum = 0;
   bucketIntervalMax = 0;
+  bucketOutliers = 0;
+  bucketMinInterval = UINT32_MAX;
 }
 
 // ------------------------------------------------------------------------- raw W5500 access
@@ -262,12 +281,12 @@ void handleStats() {
   out.reserve(16384);
   out += "{";
   out += "\"uptime\":" + String((unsigned long)(esp_timer_get_time() / 1000000));
-  out += ",\"link\":{\"up\":" + String(ETH.linkUp() ? "true" : "false");
-  out += ",\"speed\":" + String(ETH.linkSpeed());
-  out += ",\"duplex\":\"" + String(ETH.fullDuplex() ? "full" : "half") + "\"";
+  out += ",\"link\":{\"up\":" + String(ethLinkUp() ? "true" : "false");
+  out += ",\"speed\":" + String(ethLinkSpeed());
+  out += ",\"duplex\":\"" + String(ethFullDuplex() ? "full" : "half") + "\"";
   out += ",\"versionr\":" + String(versionr) + "}";
-  out += ",\"ip\":\"" + ETH.localIP().toString() + "\"";
-  out += ",\"mac\":\"" + ETH.macAddress() + "\"";
+  out += ",\"ip\":\"" + ethLocalIP().toString() + "\"";
+  out += ",\"mac\":\"" + ethMacAddress() + "\"";
   out += ",\"scanPort\":" + String(scanPort);
   out += ",\"discovered\":\"" + String(discovered) + "\"";
   out += ",\"leased\":" + String(sensorLeased ? "true" : "false");
@@ -333,23 +352,24 @@ void setup() {
   // Sanity-check the chip before the driver touches it: VERSIONR has a known reset value, so a
   // wrong pinout says so here rather than looking like a dead sensor later. Then give the bus
   // back -- see readRegisterRaw() for why nothing may touch it again.
+  // Started before Ethernet on purpose. The UI rides WiFi so that a machine with no spare NIC --
+  // or no WiFi at all, like the PC on this bench -- is not what decides whether the measurement
+  // can be seen; and bringing the radio up first is also what initialises the netif and lwIP
+  // machinery that the hand-rolled Ethernet bring-up below then joins.
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(kApSsid, kApPassword);
+
   versionr = readRegisterRaw(0x0039);
   Serial.printf("W5500 VERSIONR 0x%02X (expect 0x04)\n", versionr);
   rawSpi.end();
 
-  if (!ETH.begin(ETH_PHY_W5500, 1, kCs, -1, -1, SPI2_HOST, kSck, kMiso, kMosi)) {
-    Serial.println("ETH.begin failed -- check the pinout above all else");
+  // One millisecond rather than Arduino's ten. See eth_w5500.h: with no interrupt line the
+  // driver polls, and the poll period is the resolution of every arrival time this rig records.
+  if (!ethStart(kSck, kMiso, kMosi, kCs, 1, kStaticSelf, kStaticMask, kStaticGateway)) {
+    Serial.println("ethStart failed -- check the pinout above all else");
   }
-
-  // Give DHCP a bounded chance. A sensor plugged straight in is unlikely to serve it, so this
-  // is a short wait rather than a blocking one.
-  const int64_t deadline = esp_timer_get_time() + 6000000;
-  while (ETH.localIP() == IPAddress(0, 0, 0, 0) && esp_timer_get_time() < deadline) delay(200);
-  if (ETH.localIP() == IPAddress(0, 0, 0, 0)) {
-    Serial.println("no DHCP lease, falling back to static 192.168.1.20");
-    ETH.config(kStaticSelf, kStaticGateway, kStaticMask);
-  }
-  Serial.printf("ip %s  mac %s\n", ETH.localIP().toString().c_str(), ETH.macAddress().c_str());
+  delay(500);
+  Serial.printf("ip %s  mac %s\n", ethLocalIP().toString().c_str(), ethMacAddress().c_str());
 
   prefs.begin("lidar", false);
   streamRequested = prefs.getBool("stream", false);
@@ -378,22 +398,29 @@ void setup() {
     const bool ok = configureSensor(mode.c_str(), profile.c_str());
     server.send(ok ? 200 : 502, "text/plain", configResult);
   });
-  // The UI rides WiFi so that a machine with no spare NIC -- or no WiFi at all, like the PC on
-  // this bench -- is not what decides whether the measurement can be seen.
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(kApSsid, kApPassword);
   server.begin();
-  Serial.printf("http://%s/  (ethernet)\n", ETH.localIP().toString().c_str());
+  Serial.printf("http://%s/  (ethernet)\n", ethLocalIP().toString().c_str());
   Serial.printf("http://%s/  (wifi ap \"%s\", password \"%s\")\n",
                 WiFi.softAPIP().toString().c_str(), kApSsid, kApPassword);
 
   bucketStart = esp_timer_get_time();
   quietSince = bucketStart;
+
+  xTaskCreatePinnedToCore(serverTask, "http", 8192, nullptr, 1, nullptr, 0);
+  Serial.printf("FreeRTOS tick %u Hz -- one tick is %u ms, which is why HTTP is the task\n",
+                configTICK_RATE_HZ, 1000 / configTICK_RATE_HZ);
 }
+
+// How many packets one call pulls out. If the board were keeping up this would be one; anything
+// more means they were sitting in the W5500 while the loop was busy elsewhere, and the arrival
+// times recorded for them are when this code got round to them rather than when they landed.
+int maxBurst = 0, lastBurst = 0;
 
 void drain(NetworkUDP &udp, Flow &s, bool timed) {
   int size;
+  int burst = 0;
   while ((size = udp.parsePacket()) > 0) {
+    if (timed && ++burst > maxBurst) maxBurst = burst;
     const IPAddress from = udp.remoteIP();
     const uint16_t fromPort = udp.remotePort();
     const int read = udp.read(packet, min<size_t>(size, kPacketBuffer));
@@ -403,6 +430,7 @@ void drain(NetworkUDP &udp, Flow &s, bool timed) {
     }
     recordArrival(s, size, from, fromPort, timed);
   }
+  if (timed && burst) lastBurst = burst;
 }
 
 // BOOTP/DHCP is fixed-layout up to the options, so what is needed here takes no real parser:
@@ -425,17 +453,17 @@ void sendDhcpReply(const uint8_t *request, int length, uint8_t messageType) {
   memcpy(reply + 4, request + 4, 4);   // xid, echoed
   memcpy(reply + 10, request + 10, 2); // flags
   writeIp(reply + 16, kSensorAddress);  // yiaddr -- the address being offered
-  writeIp(reply + 20, ETH.localIP());   // siaddr -- us
+  writeIp(reply + 20, ethLocalIP());   // siaddr -- us
   memcpy(reply + 28, request + 28, 16);
   reply[236] = 0x63; reply[237] = 0x82; reply[238] = 0x53; reply[239] = 0x63;  // magic cookie
 
   int i = 240;
   reply[i++] = 53; reply[i++] = 1; reply[i++] = messageType;
-  reply[i++] = 54; reply[i++] = 4; writeIp(reply + i, ETH.localIP()); i += 4;
+  reply[i++] = 54; reply[i++] = 4; writeIp(reply + i, ethLocalIP()); i += 4;
   reply[i++] = 51; reply[i++] = 4;
   reply[i++] = 0; reply[i++] = 0x01; reply[i++] = 0x51; reply[i++] = 0x80;  // 86400 s
   reply[i++] = 1;  reply[i++] = 4; writeIp(reply + i, kStaticMask); i += 4;
-  reply[i++] = 3;  reply[i++] = 4; writeIp(reply + i, ETH.localIP()); i += 4;
+  reply[i++] = 3;  reply[i++] = 4; writeIp(reply + i, ethLocalIP()); i += 4;
   reply[i++] = 255;
 
   // Broadcast rather than unicast: the client has no address yet, so a unicast reply would need
@@ -514,7 +542,7 @@ bool configureSensor(const char *mode, const char *profile, bool remember) {
   http.setTimeout(remember ? 8000 : 3000);
   if (!http.begin("http://" + kSensorAddress.toString() + "/api/v1/sensor/config")) return false;
   http.addHeader("Content-Type", "application/json");
-  String body = "{\"udp_dest\":\"" + ETH.localIP().toString() + "\"";
+  String body = "{\"udp_dest\":\"" + ethLocalIP().toString() + "\"";
   body += ",\"udp_port_lidar\":" + String(kLidarPort);
   body += ",\"udp_port_imu\":" + String(kImuPort);
   body += ",\"lidar_mode\":\"" + String(mode) + "\"";
@@ -648,6 +676,44 @@ void handleConsole() {
                     code >> 5, code & 0x1F);
       break;
     }
+    case 'w':
+      // A/B the radio against the stall. The AP shares a core with this loop, and a periodic
+      // radio task is the kind of thing that holds it for ten milliseconds without ever showing
+      // up inside any section timed above.
+      apRunning = !apRunning;
+      if (apRunning) WiFi.softAP(kApSsid, kApPassword); else WiFi.softAPdisconnect(true);
+      Serial.printf("wifi ap %s\n", apRunning ? "on" : "off");
+      break;
+    case 'p': {
+      // Find the W5500's interrupt line, if it is wired at all. Same method that found the SPI
+      // pins on this board: do not trust a datasheet, watch every pin at once and let the one
+      // that behaves like the answer identify itself. With the sensor streaming, INT asserts on
+      // every arriving frame and clears when the driver services it, so it is the pin that
+      // toggles in step with traffic while everything idle stays still.
+      //
+      // Excluded and why: 19/20 are native USB, 33-37 are the octal PSRAM bus, and 21/45/47/48
+      // are the SPI bus itself, which obviously toggles.
+      static const int kSkip[] = {19, 20, 21, 33, 34, 35, 36, 37, 45, 47, 48};
+      uint64_t first = 0, changed = 0;
+      auto sample = []() -> uint64_t {
+        return uint64_t(REG_READ(GPIO_IN_REG)) | (uint64_t(REG_READ(GPIO_IN1_REG)) << 32);
+      };
+      first = sample();
+      const int64_t until = esp_timer_get_time() + 1000000;
+      uint32_t samples = 0;
+      while (esp_timer_get_time() < until) { changed |= sample() ^ first; samples++; }
+      Serial.printf("watched %u samples over 1 s; pins that moved:\n", samples);
+      bool any = false;
+      for (int pin = 0; pin <= 48; pin++) {
+        if (!((changed >> pin) & 1)) continue;
+        bool skip = false;
+        for (int k : kSkip) if (k == pin) skip = true;
+        Serial.printf("  GPIO%-2d %s\n", pin, skip ? "(bus or USB -- expected)" : "<-- candidate");
+        if (!skip) any = true;
+      }
+      if (!any) Serial.println("  nothing outside the known buses moved: INT is not wired here");
+      break;
+    }
     case '?':
       Serial.println("i=info  g<path>=GET  s=catalog  S=ports  T<preset>=gate on  t=gate off  "
                      "c=512x10  C=1024x10  r=reset");
@@ -657,21 +723,51 @@ void handleConsole() {
   }
 }
 
+// Reading packets is the one thing on this board that cannot be late, so it does not share a
+// thread with anything else. It used to: draining ran in loop() next to server.handleClient(),
+// and handleClient costs four to five milliseconds once a second even with no client connected
+// -- long enough for four packets to pile up in the W5500 and then be read in one burst, all
+// four stamped with the time the loop got round to them rather than when they arrived. That
+// showed up as an 11 ms gap every second and it was entirely this code's doing.
+//
+// So the web server moves out instead, and the reader keeps loop() -- which is the only thread
+// here that spins without sleeping. Putting the reader in a task of its own looked right and was
+// worse: the smallest sleep a task can take is one tick, Arduino's tick is 100 Hz, and so
+// vTaskDelay(1) parked the reader for ten milliseconds at a time. Packets then arrived in groups
+// of three or four about 190 us apart -- the time it takes to pull one off the W5500 over SPI --
+// separated by ten millisecond holes. Exactly 100 of those holes a second, which is what gave it
+// away: one per tick, not one per second.
+//
+// HTTP does not care about ten milliseconds, so it is the thing that gets to sleep.
+//
+// The statistics are written by loop() and read here without a lock. A torn read costs one wrong
+// number in a display that refreshes every second; a lock would cost what this split is for.
+void serverTask(void *) {
+  for (;;) {
+    const int64_t start = esp_timer_get_time();
+    server.handleClient();
+    const int64_t spent = esp_timer_get_time() - start;
+    if (spent > worstServe) worstServe = spent;
+    vTaskDelay(1);
+  }
+}
+
 void loop() {
+  const int64_t passStart = esp_timer_get_time();
   handleConsole();
 
-  // Drain before serving: at 1280 packets a second the W5500's socket buffer is the scarce
-  // resource, and a page render that blocks for tens of milliseconds would show up as a
-  // measurement artefact rather than as slow HTTP.
   drain(lidarUdp, lidar, true);
   drain(imuUdp, imu, false);
   drainDhcp();
   if (scanPort) drain(scanUdp, scan, false);
 
-  server.handleClient();
+  const int64_t afterDrain = esp_timer_get_time();
+  if (afterDrain - passStart > worstDrain) worstDrain = afterDrain - passStart;
+  if (afterDrain - passStart > worstPass) worstPass = afterDrain - passStart;
 
   const int64_t now = esp_timer_get_time();
   if (now - bucketStart >= 1000000) {
+    const int64_t houseStart = now;
     bucketStart = now;
     closeBucket();
     // If a stream was asked for and none is arriving, ask again -- but not oftener than every
@@ -689,9 +785,18 @@ void loop() {
     // the sensor keeps sending at the same rate. So the second's worst gap goes out beside it.
     const HistoryBucket &last = history[(historyHead - 1 + kHistory) % kHistory];
     Serial.printf("link %s %uM %s | lidar %lu pkt %u/s (%u B, gap %lu us mean / %lu us max) | imu %lu\n",
-                  ETH.linkUp() ? "UP" : "DOWN", ETH.linkSpeed(),
-                  ETH.fullDuplex() ? "full" : "half", (unsigned long)lidar.packets, last.packets,
+                  ethLinkUp() ? "UP" : "DOWN", ethLinkSpeed(),
+                  ethFullDuplex() ? "full" : "half", (unsigned long)lidar.packets, last.packets,
                   lidar.lastSize, (unsigned long)last.meanInterval,
                   (unsigned long)last.maxInterval, (unsigned long)imu.packets);
+    // Printed a cycle late on purpose: the cost of the housekeeping cannot be measured by the
+    // housekeeping that reports it, so this is the previous second's figure.
+    Serial.printf("   gaps over %u us: %lu | min gap %lu us | burst %d | serve %ld us | house %ld us\n",
+                  kOutlierThresholdUs, (unsigned long)lastOutliers,
+                  (unsigned long)lastMinInterval, maxBurst, (long)worstServe,
+                  (long)housekeepingUs);
+    worstDrain = worstServe = worstPass = 0;
+    housekeepingUs = esp_timer_get_time() - houseStart;
+    maxBurst = 0;
   }
 }

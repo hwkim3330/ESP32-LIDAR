@@ -184,6 +184,50 @@ starves IDLE0 and reboots the board on the task watchdog about fifteen seconds i
 build of this firmware did exactly that. Raw access is confined to the boot-time pinout check,
 and the bus is handed over afterwards.
 
+## The 11 ms gap was Arduino's polling interval (2026-08-11, fixed)
+
+The instrument was wrong, and for a while so were the theories about it. What it turned out to
+be: **this board's W5500 has no interrupt line**, and with no interrupt the driver polls — at a
+period Arduino hardcodes to ten milliseconds:
+
+```
+libraries/Ethernet/src/ETH.cpp:677    if (_pin_irq < 0) { mac_config.poll_period_ms = 10; }
+```
+
+So packets were handed over in batches. At 320 a second that is groups of three or four, each
+171 us apart — the cost of pulling one frame off the chip over SPI — separated by ten
+millisecond holes. **Exactly 100 holes a second**, which is what finally gave it away: one per
+poll, not one per second. Every arrival time this rig had recorded was the moment a poll
+collected the packet, not the moment it landed.
+
+Three wrong theories died on the way, each cheap to kill once it was stated as a number:
+
+- *The once-a-second housekeeping.* Timed it: 340 us. Not it.
+- *The WiFi AP stealing the core.* Turned it off and measured: identical. Not it.
+- *`server.handleClient()`, which really does cost 4-5 ms with no client connected.* Moving the
+  reader into its own task made things **worse** — the smallest sleep a task can take is one
+  tick, and while the tick here is 1 kHz, the packet reader then sat behind the same 10 ms
+  batches with an extra layer on top. The web server is the thing that gets to sleep; the reader
+  keeps `loop()`, which never does.
+
+The fix is `firmware/lidar_probe/eth_w5500.h`: bring the W5500 up directly on esp_eth with
+`poll_period_ms = 1` instead of going through Arduino's ETH class, and attach it to esp_netif
+the same way ETH.begin would, so lwIP, NetworkUDP, WebServer and the soft AP never notice.
+Two things it needs that ETH.begin was quietly doing: `esp_netif_init()` before any socket
+exists — without it the first `udp.begin()` asserts on a null queue and the board boot-loops —
+and the WiFi AP started first, since bringing the radio up initialises the same machinery.
+
+| | before | after |
+|---|---|---|
+| gaps over 6250 us, per second | **100** | **0-1** |
+| smallest gap | 171 us, identical every second | 1650-2550 us, and it varies |
+| worst gap | 11.5 ms | 6.5 ms |
+| packets per read | 4 | 1 |
+
+A fixed minimum gap was the tell in hindsight: real traffic does not arrive the same distance
+apart to the microsecond, second after second. That number was never the network. It was how
+long this board takes to read one packet.
+
 ## TAS: measured, and it showed nothing (2026-08-11)
 
 A 1 ms cycle with 800 us all-open and 200 us of TC0 closed, written to port 1, against the
@@ -195,12 +239,11 @@ sensor's stream:
 | TC0 closed 200 us in 1 ms | 3134 us | 319-321/s | 12.0 ms |
 | open again | 3134 us | 320-323/s | 12.1 ms |
 
-Not a failure of TAS — this rig cannot see it. Packets arrive 3125 us apart on a link running at
-3% utilisation, so when the gate shuts there is nothing queued to delay. And the baseline itself
-has an **11-14 ms gap once a second**, which is sixty times the window being measured: the board
-stalls during its own once-a-second housekeeping and misses packets. The instrument has to be
-fixed before shaping is worth measuring at all, and that stall is the first real bug this project
-has in its own code rather than in something it talks to.
+Not a failure of TAS — this rig could not see it. Packets arrive 3125 us apart on a link running
+at 3% utilisation, so when the gate shuts there is nothing queued to delay. And at the time the
+measurement itself was quantised to 10 ms (above), sixty times the window being tested. Worth
+repeating now that the instrument resolves single packets, with a cycle long enough to matter:
+the shaping has to be coarser than the arrival spacing, or the link busy enough to queue.
 
 ## Writing a schedule from the board is disabled, and why
 
@@ -230,8 +273,9 @@ leaves, `admin-gate-states`) — worth doing, since the point of this board is t
   against mock data, but no device has joined the AP to look at the real thing.
 - Three hops, and what TAS does to these numbers. The gap distribution above is the baseline to
   compare against.
-- **The once-a-second stall.** 11-14 ms of missed packets, in this board's own loop. Everything
-  timing-related is limited by it, so it comes before any more measurement.
+- **Repeat the TAS run** now that arrivals are resolved to a packet rather than to 10 ms.
+- **The remaining 6.5 ms worst gap**, down from 11.5. Whether that is the sensor, the switch or
+  still the 1 ms poll floor is not yet established.
 - **Schedule writes from the board**, as one atomic container patch. The point of this rig is to
   need no PC, and sensor configuration already needs none; the switch side is what is left.
 - **A second LAN9662**, for three hops.
