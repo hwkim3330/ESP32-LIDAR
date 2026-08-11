@@ -1045,6 +1045,28 @@ void handleConsole() {
       fetchBeamGeometry();
       break;
     }
+    case 'f': {
+      // Fetch any SID from the switch and print what comes back. The CLI cannot resolve every
+      // module's paths -- mchp-velocitysp-redbox among them -- and a SID is a number, so the
+      // board can ask for things the tool on the PC cannot. Hex because the point is to see
+      // whether a node exists and what shape its answer is, before writing a decoder for it.
+      const String arg = Serial.readStringUntil('\n');
+      const uint32_t sid = arg.toInt();
+      if (!sid) { Serial.println("usage: f39202   (a SID, decimal)"); break; }
+      static uint8_t payload[2048];
+      uint8_t code = 0;
+      int blocks = 0;
+      const int n = fetchSid(sid, payload, sizeof(payload), &code, &blocks);
+      Serial.printf("SID %lu from %s: %d bytes in %d block(s), code %d.%02d\n",
+                    (unsigned long)sid, kSwitch.toString().c_str(), n, blocks, code >> 5,
+                    code & 0x1F);
+      for (int i = 0; i < n; i++) {
+        Serial.printf("%02X", payload[i]);
+        if ((i % 32) == 31) Serial.println();
+      }
+      if (n > 0) Serial.println();
+      break;
+    }
     case 'A': {
       const String which = Serial.readStringUntil('\n');
       int index = 0;

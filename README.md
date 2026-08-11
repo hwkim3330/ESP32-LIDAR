@@ -571,6 +571,38 @@ negotiated at 100M. It would not have been worth much anyway: 100M is a real TSN
 10M is not, so shaping demonstrated on it would be a demonstration about a toy link. The firmware
 keeps the toggle (`1` on the console) and the bench runs negotiated.
 
+## What these switches can actually do (2026-08-11)
+
+Asked the catalogs rather than guessed, and then asked the device rather than the catalog.
+
+**RedBox is out.** `mchp-velocitysp-redbox` is modelled — modes `prp-san`, `hsr-san`, `hsr-prp`,
+`hsr-hsr`, node tables, supervision frames, the lot — and it exists **only in the LAN9662's
+catalog**; the LAN9692 build does not carry the module at all. And the 9662 that does carry it
+says:
+
+```
+f39202  ->  BF 19 9922 9F FF FF      redbox-capable-list = []
+```
+
+**No port on it is RedBox-capable.** A model in the catalog is a description of the software, not
+a promise about the silicon in front of you. Not worth a day.
+
+**Frame replication is out too.** Neither catalog has `ieee802-dot1cb-frer`; both have
+`ieee802-dot1cb-stream-identification`, which identifies streams without duplicating them. So a
+switch here cannot be a traffic source under any configuration.
+
+**Still unused and available on both:** `ieee802-dot1q-psfp` with `stream-filters-gates` — gates
+and meters per *stream* rather than per port, which is a sharper instrument than TAS for
+protecting one flow — and `ieee802-dot1q-preemption`, whose effect on a 100M port carrying 1280
+byte frames is large enough to measure. The 9662 also has `mchp-velocitysp-acl`.
+
+Otherwise the two catalogs are the same set: 54 modules against 53, and the only difference in
+either direction is that one RedBox module.
+
+`f<sid>` on the board's console fetches any SID from the switch and prints the CBOR. The CLI
+cannot resolve every module's paths — the RedBox ones among them — and a SID is just a number, so
+the board can ask for things the tool on the PC cannot.
+
 ## Tomorrow: the LAN9692
 
 `docs/9692.md` is the runbook — arrangement, order of operations, and every trap this bench has
