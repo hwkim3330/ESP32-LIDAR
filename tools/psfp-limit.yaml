@@ -1,0 +1,57 @@
+# Police the sensor's stream by rate -- per stream, not per port.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/psfp-limit.yaml \
+#       --transport serial -d /dev/ttyACM2
+#
+# A gate schedule acts on a traffic class leaving a port. A flow meter acts on the frames a
+# filter selects and drops what exceeds a rate. The device has room for 64 of each, asked rather
+# than assumed: max-flow-meter-instances, max-stream-filter-instances and max-stream-gate-
+# instances all read 64 on bridge b0 component c0.
+#
+# Three pieces, in this order, because each refers to the one before:
+#
+#   1. a stream identity, which turns "frames for this MAC" into a handle
+#   2. a flow meter, which is a rate and a burst
+#   3. a filter, which sends that handle's frames through that meter
+#
+# Read the `-dev.yang` deviation files before writing any of this. They are the difference
+# between what the standard models and what this build implements, and three separate attempts
+# here failed on nodes they had already declared `not-supported`:
+#
+#   psfp-bridge  stream-handle-spec/wildcard     -- so a real stream handle is required, hence (1)
+#   psfp-bridge  flow-meter-enable               -- so it is absent below
+#   dot1cb       in-facing                       -- so the identity is placed out-facing
+#   dot1cb       .../identification-type         -- so it is absent below
+#
+# The device's own errors said the same thing each time ("SID not found", with the data node), but
+# the deviation file says it before the round trip rather than after.
+#
+# 1 Mbit/s against a stream that sends 3.3 should pass about a third of it.
+# Every leaf on its own, each carrying the list key in its path. This device refuses a list entry
+# with leaves nested inside it -- "List keys not allowed" -- which keti-reconfig hit once already
+# on the interface list. The shape it accepts is {leaf, key}: value.
+- ? "/ieee802-dot1q-bridge:bridges/bridge[name='b0']/component[name='c0']/ieee802-dot1q-psfp-bridge:flow-meters/flow-meter-instance-table[flow-meter-instance-id='0']/committed-information-rate"
+  : 1000000
+- ? "/ieee802-dot1q-bridge:bridges/bridge[name='b0']/component[name='c0']/ieee802-dot1q-psfp-bridge:flow-meters/flow-meter-instance-table[flow-meter-instance-id='0']/committed-burst-size"
+  : 4000
+- ? "/ieee802-dot1q-bridge:bridges/bridge[name='b0']/component[name='c0']/ieee802-dot1q-psfp-bridge:flow-meters/flow-meter-instance-table[flow-meter-instance-id='0']/drop-on-yellow"
+  : true
+
+- ? "/ieee802-dot1cb-stream-identification:stream-identity[index='0']/handle"
+  : 1
+- ? "/ieee802-dot1cb-stream-identification:stream-identity[index='0']/parameters/null-stream-identification/destination-mac"
+  : 96-A9-90-CF-A5-39
+- ? "/ieee802-dot1cb-stream-identification:stream-identity[index='0']/parameters/null-stream-identification/tagged"
+  : all
+- ? "/ieee802-dot1cb-stream-identification:stream-identity[index='0']/parameters/null-stream-identification/vlan"
+  : 1
+- ? "/ieee802-dot1cb-stream-identification:stream-identity[index='0']/out-facing/input-port"
+  : ['2']
+
+- ? "/ieee802-dot1q-bridge:bridges/bridge[name='b0']/component[name='c0']/ieee802-dot1q-psfp-bridge:stream-filters/stream-filter-instance-table[stream-filter-instance-id='0']/stream-handle"
+  : 1
+- ? "/ieee802-dot1q-bridge:bridges/bridge[name='b0']/component[name='c0']/ieee802-dot1q-psfp-bridge:stream-filters/stream-filter-instance-table[stream-filter-instance-id='0']/priority-spec"
+  : zero
+- ? "/ieee802-dot1q-bridge:bridges/bridge[name='b0']/component[name='c0']/ieee802-dot1q-psfp-bridge:stream-filters/stream-filter-instance-table[stream-filter-instance-id='0']/flow-meter-ref"
+  : 0

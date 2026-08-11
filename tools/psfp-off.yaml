@@ -1,0 +1,5 @@
+# Remove the stream filter and its meter. A null value is how CORECONF deletes.
+- ? "/ieee802-dot1q-bridge:bridges/bridge[name='b0']/component[name='c0']/ieee802-dot1q-psfp-bridge:stream-filters/stream-filter-instance-table[stream-filter-instance-id='0']"
+  :
+- ? "/ieee802-dot1q-bridge:bridges/bridge[name='b0']/component[name='c0']/ieee802-dot1q-psfp-bridge:flow-meters/flow-meter-instance-table[flow-meter-instance-id='0']"
+  :
