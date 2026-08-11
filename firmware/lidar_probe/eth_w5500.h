@@ -25,7 +25,19 @@
 #include <esp_netif.h>
 #include <driver/spi_master.h>
 
-// Raise carefully and check VERSIONR still reads 0x04 afterwards.
+// Forty, and the number is measured rather than chosen. The part is rated to 80 MHz; this board's
+// traces are not -- at 80 the link does not come up at all. What settles it is that 40 and 60
+// perform identically:
+//
+//   20 MHz   3.84 Mbit/s out (1200 byte frames)
+//   40 MHz   8.34 Mbit/s out (1500 byte frames)   FCS errors +0 over 117,562 frames in 3 minutes
+//   60 MHz   7.87 Mbit/s out                      FCS errors +0
+//   80 MHz   link dead
+//
+// Past 40 the clock stops buying anything, because what is left is the driver waiting for each
+// transmit to complete -- 1138 us of the 1438 a frame costs. So 40 reaches the ceiling with the
+// most margin below where the wiring gives up, and the switch's own FCS counter is the judge:
+// three minutes of load and not one corrupt frame.
 constexpr int kEthSpiMhz = 40;
 
 static esp_eth_handle_t gEthHandle = nullptr;

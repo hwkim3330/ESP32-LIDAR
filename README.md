@@ -614,10 +614,18 @@ Asking for more does not get more, so the question became how much the chip can 
 | 20 MHz | 1200 B | 3.84 Mbit/s | 2400 µs |
 | 40 MHz | 1200 B | 5.95 Mbit/s | 1613 µs |
 | **40 MHz** | **1500 B** | **8.34 Mbit/s** | **1438 µs** |
-| 80 MHz | — | link dead, VERSIONR wrong | — |
+| 60 MHz | 1500 B | 7.87 Mbit/s | — |
+| 80 MHz | — | link dead | — |
 
-Two and a bit times the starting figure, and the last row is where this board's wiring gives up —
-the part is rated to 80 MHz but these traces are not.
+Two and a bit times the starting figure. The last row is where this board's wiring gives up — the
+part is rated to 80 MHz but these traces are not — and **the row above it is the interesting
+one: 60 MHz performs the same as 40**, 656 frames a second against 653. Past 40 the clock stops
+buying anything, which is the quantitative version of the paragraph below.
+
+Stability was measured rather than assumed, with the switch's own FCS counter as the judge: three
+minutes of load at 40 MHz, **117,562 frames, not one corrupt** (`in-error-fcs-frames +0`,
+undersize +0), and the sensor never dropping below 315/s in 179 samples. So 40 MHz is the
+setting: it reaches the ceiling while sitting furthest from where the wiring fails.
 
 **The remaining wall is not the clock.** At 40 MHz a 1500 byte frame is 300 µs of SPI, and each
 one costs 1438 — so 1138 µs per frame is the driver waiting for the transmit to complete. Raising
