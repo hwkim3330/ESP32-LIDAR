@@ -7,18 +7,9 @@
 
 #include <stdint.h>
 
-#define KETI_SID_CATALOG_CHECKSUM_9662 "5151bae07677b1501f9cf52637f2a38f"
+#define KETI_SID_CATALOG_CHECKSUM_9692 "440057a11e66eed82bc8e838347f694c"
 
-// The one SID that cannot be generated, because it is what you ask for before you
-// know which catalog you are talking to.
-#define KETI_SID_YANG_CHECKSUM 29304u
-
-struct KetiSidEntry {
-  const char *path;
-  uint32_t sid;
-};
-
-static const KetiSidEntry kKetiSidTable9662[] = {
+static const KetiSidEntry kKetiSidTable9692[] = {
     {"ietf-interfaces:interfaces", 2005u},
     {"ietf-interfaces:interfaces/interface", 2033u},
     {"ietf-interfaces:interfaces/interface/name", 2042u},
@@ -57,13 +48,13 @@ static const KetiSidEntry kKetiSidTable9662[] = {
     {"ietf-system:system-state/platform/machine", 19025u},
 };
 
-static constexpr int kKetiSidCount9662 = 36;
+static constexpr int kKetiSidCount9692 = 36;
 
-inline uint32_t ketiSidFor9662(const char *path) {
-  for (int i = 0; i < kKetiSidCount9662; ++i) {
-    const char *a = kKetiSidTable9662[i].path, *b = path;
+inline uint32_t ketiSidFor9692(const char *path) {
+  for (int i = 0; i < kKetiSidCount9692; ++i) {
+    const char *a = kKetiSidTable9692[i].path, *b = path;
     while (*a && *a == *b) { ++a; ++b; }
-    if (*a == 0 && *b == 0) return kKetiSidTable9662[i].sid;
+    if (*a == 0 && *b == 0) return kKetiSidTable9692[i].sid;
   }
   return 0;  // caller must treat 0 as "not in the table", never as a valid SID
 }

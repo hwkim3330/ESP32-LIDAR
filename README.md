@@ -557,6 +557,25 @@ negotiated at 100M. It would not have been worth much anyway: 100M is a real TSN
 10M is not, so shaping demonstrated on it would be a demonstration about a toy link. The firmware
 keeps the toggle (`1` on the console) and the bench runs negotiated.
 
+## Tomorrow: the LAN9692
+
+`docs/9692.md` is the runbook — arrangement, order of operations, and every trap this bench has
+already paid for once.
+
+The firmware is ready for it: it carries **both catalogs' SID tables** and picks between them from
+the checksum the device reports about itself, because a table used against the wrong catalog
+addresses the wrong nodes and returns plausible nonsense. `s` on the console says which it chose.
+
+The 9662s do not become spare. **They are the fault injector** — a switch cannot generate traffic
+(neither catalog carries frame replication; `ieee802-dot1cb-frer` is absent and only stream
+identification is there), but it makes a remotely-cut cable, which is what RECON's link-failure
+case needs. `tools/port2-down.yaml` and `port2-up.yaml` already do it.
+
+Two capabilities turned up in the catalogs while checking that, both present on both parts and
+neither used yet: **PSFP** (`ieee802-dot1q-psfp`, per-stream gates and meters rather than
+per-port) and **frame preemption** (`ieee802-dot1q-preemption`), which on a 100M port with 1280
+byte frames is a large enough effect to see.
+
 ## Not done yet
 
 - The page has not been opened in a browser — the firmware serves it, and it has been rendered

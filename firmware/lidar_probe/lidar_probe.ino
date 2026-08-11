@@ -934,10 +934,12 @@ void handleConsole() {
         if (!switchCatalog.length()) { Serial.println("no answer"); continue; }
         Serial.printf("%s -> %s\n", switchCatalog.c_str(), nameForCatalog(switchCatalog));
         // A table built against another catalog addresses the wrong nodes and returns plausible
-        // nonsense, which is worse than returning nothing.
-        if (switchCatalog != KETI_SID_CATALOG_CHECKSUM)
-          Serial.printf("  WARNING: this firmware's SID table is for %s\n",
-                        KETI_SID_CATALOG_CHECKSUM);
+        // nonsense, which is worse than returning nothing. This firmware carries both of the
+        // bench's catalogs and picks by what the device answered.
+        if (selectCatalog(switchCatalog))
+          Serial.printf("  using the %s SID table\n", activeCatalog == 1 ? "LAN9692" : "LAN9662");
+        else
+          Serial.println("  no SID table for this catalog -- generate one before trusting reads");
       }
       break;
     }

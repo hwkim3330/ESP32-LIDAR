@@ -13,9 +13,9 @@
 #pragma once
 #include <Arduino.h>
 
+#include "sid_tables.h"   // must come first: coreconf.h calls ketiSidFor
 #include "coap_client.h"
 #include "coreconf.h"
-#include "sid_table.h"
 
 // The catalogs this bench has produced, so a checksum means something without a lookup.
 struct KnownCatalog {
@@ -32,6 +32,7 @@ inline const char *nameForCatalog(const String &checksum) {
     if (checksum == c.checksum) return c.device;
   return "unknown catalog -- generate a SID table for it before trusting anything else";
 }
+
 
 // ------------------------------------------------------------------------- writing a schedule
 

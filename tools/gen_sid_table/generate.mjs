@@ -21,7 +21,7 @@ const { resolvePathToSid } = await import(`${CLI}/tsc2cbor/lib/common/sid-resolv
 const here = path.dirname(new URL(import.meta.url).pathname);
 const pathsFile = process.argv[2] ?? path.join(here, 'paths.yaml');
 const outFile = process.argv[3] ??
-  path.join(here, '../../firmware/lidar_probe/sid_table.h');
+  path.join(here, process.env.KETI_OUT ?? '../../firmware/lidar_probe/sid_table.h');
 
 // The cache directory is named after the catalog checksum, which is exactly the identifier
 // that has to end up in the header.
@@ -86,28 +86,34 @@ lines.push('#pragma once');
 lines.push('');
 lines.push('#include <stdint.h>');
 lines.push('');
-lines.push(`#define KETI_SID_CATALOG_CHECKSUM "${checksum}"`);
+// A firmware that may meet either switch carries both tables, so the names are suffixed and the
+// shared declarations are emitted only once -- with the first table generated.
+const suffix = process.env.KETI_SUFFIX ?? '';
+const shared = process.env.KETI_SHARED !== 'no';
+lines.push(`#define KETI_SID_CATALOG_CHECKSUM${suffix ? '_' + suffix : ''} "${checksum}"`);
 lines.push('');
-lines.push('// The one SID that cannot be generated, because it is what you ask for before you');
-lines.push('// know which catalog you are talking to.');
-lines.push('#define KETI_SID_YANG_CHECKSUM 29304u');
-lines.push('');
-lines.push('struct KetiSidEntry {');
-lines.push('  const char *path;');
-lines.push('  uint32_t sid;');
-lines.push('};');
-lines.push('');
-lines.push('static const KetiSidEntry kKetiSidTable[] = {');
+if (shared) {
+  lines.push('// The one SID that cannot be generated, because it is what you ask for before you');
+  lines.push('// know which catalog you are talking to.');
+  lines.push('#define KETI_SID_YANG_CHECKSUM 29304u');
+  lines.push('');
+  lines.push('struct KetiSidEntry {');
+  lines.push('  const char *path;');
+  lines.push('  uint32_t sid;');
+  lines.push('};');
+  lines.push('');
+}
+lines.push(`static const KetiSidEntry kKetiSidTable${suffix}[] = {`);
 for (const e of entries) lines.push(`    {"${e.path}", ${e.sid}u},`);
 lines.push('};');
 lines.push('');
-lines.push(`static constexpr int kKetiSidCount = ${entries.length};`);
+lines.push(`static constexpr int kKetiSidCount${suffix} = ${entries.length};`);
 lines.push('');
-lines.push('inline uint32_t ketiSidFor(const char *path) {');
-lines.push('  for (int i = 0; i < kKetiSidCount; ++i) {');
-lines.push('    const char *a = kKetiSidTable[i].path, *b = path;');
+lines.push(`inline uint32_t ketiSidFor${suffix}(const char *path) {`);
+lines.push(`  for (int i = 0; i < kKetiSidCount${suffix}; ++i) {`);
+lines.push(`    const char *a = kKetiSidTable${suffix}[i].path, *b = path;`);
 lines.push('    while (*a && *a == *b) { ++a; ++b; }');
-lines.push('    if (*a == 0 && *b == 0) return kKetiSidTable[i].sid;');
+lines.push(`    if (*a == 0 && *b == 0) return kKetiSidTable${suffix}[i].sid;`);
 lines.push('  }');
 lines.push('  return 0;  // caller must treat 0 as "not in the table", never as a valid SID');
 lines.push('}');

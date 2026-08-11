@@ -22,8 +22,9 @@
 #pragma once
 #include <Arduino.h>
 
+#include "sid_tables.h"
 #include "coap_client.h"
-#include "sid_table.h"
+
 
 struct TasWindow {
   uint32_t intervalNs;
