@@ -51,13 +51,26 @@ class CloudView(context: Context) : GLSurfaceView(context) {
         get() = renderer.onFrameDrawn
         set(value) { renderer.onFrameDrawn = value }
 
+    var onRange: (Float, Float) -> Unit
+        get() = renderer.onRange
+        set(value) { renderer.onRange = value }
+
     private var lastX = 0f
     private var lastY = 0f
     private var lastSpan = 0f
 
+    private var lastDown = 0L
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> { lastX = event.x; lastY = event.y }
+            MotionEvent.ACTION_DOWN -> {
+                lastX = event.x; lastY = event.y
+                // Two taps in quick succession put the camera back. Orbiting a cloud is easy to
+                // get lost in and there is no other way out of an upside-down view.
+                val now = System.currentTimeMillis()
+                if (now - lastDown < 300) renderer.resetView()
+                lastDown = now
+            }
             MotionEvent.ACTION_POINTER_DOWN -> lastSpan = span(event)
             MotionEvent.ACTION_MOVE -> {
                 if (event.pointerCount >= 2) {
@@ -92,10 +105,13 @@ class CloudRenderer : GLSurfaceView.Renderer {
     private val mvp = FloatArray(16)
 
     private var yaw = 30f
-    private var pitch = 25f
-    private var distance = 18f
+    private var pitch = 22f
+    private var distance = 14f
 
     var onFrameDrawn: (Int) -> Unit = {}
+
+    /** The distance range the colour ramp currently spans, so the legend can say what it means. */
+    var onRange: (Float, Float) -> Unit = { _, _ -> }
 
     // Distance range of the current frame, smoothed so the colours do not jump between frames.
     private var lowZ = 0.5f
@@ -106,6 +122,9 @@ class CloudRenderer : GLSurfaceView.Renderer {
     private var gridVertices = 0
     private var axisBuffer: FloatBuffer = ByteBuffer.allocateDirect(4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer()
+    private var ringBuffer: FloatBuffer = ByteBuffer.allocateDirect(4)
+        .order(ByteOrder.nativeOrder()).asFloatBuffer()
+    private var ringVertices = 0
 
     // Three floats per point, rebuilt whenever a frame lands.
     private var vertices: FloatBuffer =
@@ -131,6 +150,10 @@ class CloudRenderer : GLSurfaceView.Renderer {
     }
 
     fun zoom(factor: Float) { distance = (distance / factor).coerceIn(2f, 80f) }
+
+    /** Back to a view that shows a room: close enough for height to read, high enough to see the
+     *  floor rings that give the scale. */
+    fun resetView() { yaw = 30f; pitch = 22f; distance = 14f }
 
     private val vertexShader = """
         uniform mat4 uMvp;
@@ -220,6 +243,25 @@ class CloudRenderer : GLSurfaceView.Renderer {
         lines.forEach { gridBuffer.put(it) }
         gridVertices = lines.size / 3
 
+        // Range rings at 2, 5 and 10 m. A square grid tells you there is a scale; a ring tells you
+        // what the scale is, because distance from the sensor is the thing every point is
+        // measured in and the thing the colours are mapped over.
+        val rings = ArrayList<Float>()
+        for (radius in listOf(2f, 5f, 10f)) {
+            val steps = 96
+            for (i in 0 until steps) {
+                val a = 2.0 * Math.PI * i / steps
+                val b = 2.0 * Math.PI * (i + 1) / steps
+                rings.addAll(listOf(
+                    (radius * cos(a)).toFloat(), (radius * sin(a)).toFloat(), 0f,
+                    (radius * cos(b)).toFloat(), (radius * sin(b)).toFloat(), 0f))
+            }
+        }
+        ringBuffer = ByteBuffer.allocateDirect(rings.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        rings.forEach { ringBuffer.put(it) }
+        ringVertices = rings.size / 3
+
         val axes = floatArrayOf(
             0f, 0f, 0f, 2f, 0f, 0f,
             0f, 0f, 0f, 0f, 2f, 0f,
@@ -262,6 +304,11 @@ class CloudRenderer : GLSurfaceView.Renderer {
         GLES20.glVertexAttribPointer(flatPosition, 3, GLES20.GL_FLOAT, false, 0, gridBuffer)
         GLES20.glEnableVertexAttribArray(flatPosition)
         GLES20.glDrawArrays(GLES20.GL_LINES, 0, gridVertices)
+        GLES20.glUniform4f(flatColour, 0.30f, 0.30f, 0.31f, 1f)
+        ringBuffer.position(0)
+        GLES20.glVertexAttribPointer(flatPosition, 3, GLES20.GL_FLOAT, false, 0, ringBuffer)
+        GLES20.glDrawArrays(GLES20.GL_LINES, 0, ringVertices)
+
         GLES20.glUniform4f(flatColour, 0.45f, 0.45f, 0.42f, 1f)
         axisBuffer.position(0)
         GLES20.glVertexAttribPointer(flatPosition, 3, GLES20.GL_FLOAT, false, 0, axisBuffer)
@@ -318,6 +365,7 @@ class CloudRenderer : GLSurfaceView.Renderer {
             highZ += (high - highZ) * 0.25f
         }
         onFrameDrawn(n)
+        onRange(lowZ, highZ)
     }
 
     private fun link(vertex: String, fragment: String): Int {

@@ -118,6 +118,21 @@ would do is six times the bytes over the link that is actually scarce.
 
 Measured on the tablet: `frame 194 · 4096/4096 points`. Full frames.
 
+What the app shows, and why each piece is there:
+
+- **The cloud**, coloured by distance, on a 1 m grid with **range rings at 2, 5 and 10 m**. A grid
+  says there is a scale; a ring says what it is, and distance is what every point is measured in.
+- **A legend with the ramp's actual ends** — 1.2 m to 7.5 m on a typical frame. Colour without a
+  key is decoration.
+- **Wire statistics from the board**: packets per second, mean gap, worst gap, link speed, each
+  with two minutes of history. These come from the board over BLE, so the tablet sees what the
+  Ethernet side sees without being on it.
+- **The sensor's IMU**, acceleration and angular rate. It reads +1.00 g on z, which is the sensor
+  telling you it is level.
+- No title. The room is on the screen; naming it adds nothing.
+
+Double-tap puts the camera back — orbiting a cloud is easy to get lost in.
+
 **The flicker was the app clearing its buffer.** Every new sequence number blanked the frame and
 refilled it, so a single lost notification took those columns off the screen for a second and
 brought them back — once a second, forever. The room is still; the only thing moving was the
@@ -536,7 +551,9 @@ shown at all while the only traffic on the wire is the traffic you care about.
   against mock data, but no device has joined the AP to look at the real thing.
 - Three hops, and what TAS does to these numbers. The gap distribution above is the baseline to
   compare against.
-- **Repeat the TAS run** now that arrivals are resolved to a packet rather than to 10 ms.
+- **Why a schedule written over Ethernet CoAP lands with an empty operational list**, when the
+  identical bytes over serial do not. Everything else about TAS is understood; this is not.
+- **The LAN9692**, which would end the contention problem: twelve ports instead of two.
 - **The remaining 6.5 ms worst gap**, down from 11.5. Whether that is the sensor, the switch or
   still the 1 ms poll floor is not yet established.
 - **Schedule writes from the board**, as one atomic container patch. The point of this rig is to

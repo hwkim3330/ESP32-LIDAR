@@ -57,6 +57,10 @@ class Hud(context: Context) : View(context) {
     var accel = FloatArray(3)
     var gyro = FloatArray(3)
 
+    // What the colours currently mean. Without it the ramp is decoration.
+    var rangeLow = 0f
+    var rangeHigh = 10f
+
     fun onFrame(received: Int, drawn: Int) {
         frames++
         pointsReceived = received
@@ -123,6 +127,8 @@ class Hud(context: Context) : View(context) {
         y = graph(canvas, pad, y, panelWidth, "Worst gap", worstHistory,
             listOf(seriesC), 20000f, "$outliers over 6250 µs", head = wireHead)
 
+        y = legend(canvas, pad, y, panelWidth)
+
         y = graph(canvas, pad, y, panelWidth, "Points per frame", pointHistory,
             listOf(series), CloudLink.POINTS.toFloat(), "of ${CloudLink.POINTS}")
 
@@ -131,6 +137,50 @@ class Hud(context: Context) : View(context) {
 
         graph(canvas, pad, y, panelWidth, "Angular rate  (°/s)", null,
             listOf(series, seriesB, seriesC), 60f, fmt3(gyro), gyroHistory)
+    }
+
+    /**
+     * The colour ramp, with the distances at its ends. The same five stops the shader mixes
+     * between, sampled here rather than approximated, so the key cannot drift from the picture.
+     */
+    private fun legend(canvas: Canvas, x: Float, y: Float, w: Float): Float {
+        val h = dp(58f)
+        return panel(canvas, x, y, w, h) { top ->
+            text.color = ink2; text.textSize = dp(11f); text.isFakeBoldText = true
+            canvas.drawText("Distance", x + dp(14f), top + dp(18f), text)
+
+            val barTop = top + dp(26f)
+            val barHeight = dp(10f)
+            val left = x + dp(14f)
+            val right = x + w - dp(14f)
+            val steps = 64
+            for (i in 0 until steps) {
+                val t = i / (steps - 1f)
+                fill.color = rampColour(t)
+                canvas.drawRect(left + (right - left) * i / steps, barTop,
+                    left + (right - left) * (i + 1) / steps + 1f, barTop + barHeight, fill)
+            }
+
+            text.color = muted; text.isFakeBoldText = false; text.textSize = dp(10f)
+            canvas.drawText(String.format("%.1f m", rangeLow), left, barTop + barHeight + dp(14f), text)
+            val far = String.format("%.1f m", rangeHigh)
+            canvas.drawText(far, right - text.measureText(far), barTop + barHeight + dp(14f), text)
+        }
+    }
+
+    private fun rampColour(t: Float): Int {
+        val stops = arrayOf(
+            floatArrayOf(0.16f, 0.47f, 0.84f), floatArrayOf(0.10f, 0.62f, 0.72f),
+            floatArrayOf(0.10f, 0.69f, 0.44f), floatArrayOf(0.92f, 0.63f, 0.10f),
+            floatArrayOf(0.90f, 0.35f, 0.20f))
+        val scaled = (t.coerceIn(0f, 1f) * (stops.size - 1))
+        val i = scaled.toInt().coerceAtMost(stops.size - 2)
+        val f = scaled - i
+        fun mix(a: Float, b: Float) = a + (b - a) * f
+        return Color.rgb(
+            (mix(stops[i][0], stops[i + 1][0]) * 255).toInt(),
+            (mix(stops[i][1], stops[i + 1][1]) * 255).toInt(),
+            (mix(stops[i][2], stops[i + 1][2]) * 255).toInt())
     }
 
     private fun fmt3(v: FloatArray) =

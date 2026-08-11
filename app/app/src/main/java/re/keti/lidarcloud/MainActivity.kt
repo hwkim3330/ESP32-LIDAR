@@ -41,6 +41,9 @@ class MainActivity : AppCompatActivity() {
         })
 
         cloud.onFrameDrawn = { drawn -> runOnUiThread { hud.pointsDrawn = drawn } }
+        cloud.onRange = { low, high ->
+            runOnUiThread { hud.rangeLow = low; hud.rangeHigh = high }
+        }
 
         link = CloudLink(this).apply {
             onStatus = { hud.status = it; hud.invalidate() }
