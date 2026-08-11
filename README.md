@@ -116,7 +116,15 @@ a stream stalled waiting for a retransmit is not.
 it. Ranges are converted on the tablet rather than on the board — three floats where one short
 would do is six times the bytes over the link that is actually scarce.
 
-Measured on the tablet: `frame 109 · 4096/4096 points`. Full frames, no loss.
+Measured on the tablet: `frame 194 · 4096/4096 points`. Full frames.
+
+**The flicker was the app clearing its buffer.** Every new sequence number blanked the frame and
+refilled it, so a single lost notification took those columns off the screen for a second and
+brought them back — once a second, forever. The room is still; the only thing moving was the
+loss. The buffer is not cleared now: a column that did not arrive keeps its last value, which
+says something true about a room that has not changed, where blanking it said something false.
+The board also paces notifications at 12 ms rather than 6, since Android negotiates a connection
+interval in the tens of milliseconds and drops what is queued faster than it can carry.
 
 ```
 LiDAR --1G--> [A .10] --1G--> [B .11] --100M--> ESP32-S3 --BLE--> tablet (still on office WiFi)

@@ -98,7 +98,11 @@ inline void cloudSendFrame() {
     }
     frameCharacteristic->setValue(chunk, n);
     frameCharacteristic->notify();
-    delay(6);  // the stack drops notifications queued faster than the connection interval
+    // Twelve, not six. Android negotiates a connection interval in the tens of
+    // milliseconds and notifications queued faster than it can carry them are dropped
+    // outright -- which the app used to show as columns blinking out once a second.
+    // Thirty-five chunks at 12 ms is still comfortably inside the one second budget.
+    delay(12);
   }
   frameSequence++;
 }

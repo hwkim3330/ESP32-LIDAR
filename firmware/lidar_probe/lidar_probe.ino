@@ -531,6 +531,27 @@ void drain(NetworkUDP &udp, Flow &s, bool timed) {
   if (timed && burst >= kMaxPerDrain) drainOverruns++;
 }
 
+// A small pool, because the bench acquired a second client: a tablet with a USB Ethernet adapter
+// wants an address too. The sensor is static now (192.168.1.50, set on the sensor itself), so
+// the pool starts above it and each MAC keeps the address it was first given -- a client that
+// reboots comes back as itself rather than drifting through the range.
+constexpr int kPoolFirst = 60, kPoolLast = 79;
+struct Lease {
+  uint8_t mac[6];
+  uint8_t lastOctet;
+};
+Lease leases[kPoolLast - kPoolFirst + 1];
+int leaseCount = 0;
+
+uint8_t leaseFor(const uint8_t *mac) {
+  for (int i = 0; i < leaseCount; i++)
+    if (memcmp(leases[i].mac, mac, 6) == 0) return leases[i].lastOctet;
+  if (leaseCount >= int(sizeof(leases) / sizeof(leases[0]))) return 0;
+  memcpy(leases[leaseCount].mac, mac, 6);
+  leases[leaseCount].lastOctet = kPoolFirst + leaseCount;
+  return leases[leaseCount++].lastOctet;
+}
+
 // BOOTP/DHCP is fixed-layout up to the options, so what is needed here takes no real parser:
 // chaddr sits at offset 28, and the options after the magic cookie at 240 are tag/length/value.
 // Option 53 is the message type, option 12 the hostname the sensor calls itself.
@@ -542,7 +563,7 @@ void writeIp(uint8_t *dst, const IPAddress &ip) {
   for (int i = 0; i < 4; i++) dst[i] = ip[i];
 }
 
-void sendDhcpReply(const uint8_t *request, int length, uint8_t messageType) {
+void sendDhcpReply(const uint8_t *request, int length, uint8_t messageType, uint8_t lastOctet) {
   static uint8_t reply[300];
   memset(reply, 0, sizeof(reply));
   reply[0] = 2;                        // BOOTREPLY
@@ -550,7 +571,7 @@ void sendDhcpReply(const uint8_t *request, int length, uint8_t messageType) {
   reply[2] = 6;                        // hardware address length
   memcpy(reply + 4, request + 4, 4);   // xid, echoed
   memcpy(reply + 10, request + 10, 2); // flags
-  writeIp(reply + 16, kSensorAddress);  // yiaddr -- the address being offered
+  writeIp(reply + 16, IPAddress(192, 168, 1, lastOctet));  // yiaddr -- the address being offered
   writeIp(reply + 20, ethLocalIP());   // siaddr -- us
   memcpy(reply + 28, request + 28, 16);
   reply[236] = 0x63; reply[237] = 0x82; reply[238] = 0x53; reply[239] = 0x63;  // magic cookie
@@ -596,13 +617,14 @@ void drainDhcp() {
     snprintf(discovered, sizeof(discovered), "%s %s", mac, host[0] ? host : "(no hostname)");
     memcpy(sensorMac, packet + 28, 6);
 
+    const uint8_t offered = leaseFor(packet + 28);
+    if (!offered) { Serial.println("DHCP pool is full"); continue; }
     if (messageType == 1) {           // DISCOVER
-      Serial.printf("DHCP DISCOVER from %s (%s) -> offering %s\n", mac, host,
-                    kSensorAddress.toString().c_str());
-      sendDhcpReply(packet, read, 2); // OFFER
+      Serial.printf("DHCP DISCOVER from %s (%s) -> offering 192.168.1.%u\n", mac, host, offered);
+      sendDhcpReply(packet, read, 2, offered); // OFFER
     } else if (messageType == 3) {    // REQUEST
-      Serial.printf("DHCP REQUEST from %s -> ack %s\n", mac, kSensorAddress.toString().c_str());
-      sendDhcpReply(packet, read, 5); // ACK
+      Serial.printf("DHCP REQUEST from %s -> ack 192.168.1.%u\n", mac, offered);
+      sendDhcpReply(packet, read, 5, offered); // ACK
       sensorLeased = true;
     }
   }
@@ -872,6 +894,28 @@ void handleConsole() {
           Serial.println("published to the BLE geometry characteristic");
           for (unsigned i = 0; i < body.length(); i += 512) Serial.println(body.substring(i, i + 512));
         }
+        http.end();
+      }
+      break;
+    }
+    case 'u': {
+      // Send the stream somewhere else -- to a tablet on a USB Ethernet adapter, for instance.
+      // Once the sensor addresses the tablet directly, its packets are the tablet's own traffic
+      // and an ordinary UDP socket receives them: no root, no packet capture, and none of the
+      // bandwidth ceiling that BLE imposes. The adapter has to hang off a switch port rather
+      // than off the sensor, because a 100M adapter cannot give an OS1 the gigabit link it
+      // refuses to transmit without.
+      const String dest = Serial.readStringUntil('\n');
+      if (dest.length() < 7) { Serial.println("usage: u192.168.1.60"); break; }
+      HTTPClient http;
+      http.setTimeout(8000);
+      if (http.begin("http://" + kSensorAddress.toString() + "/api/v1/sensor/config")) {
+        http.addHeader("Content-Type", "application/json");
+        String body = "{\"udp_dest\":\"" + dest + "\",\"udp_port_lidar\":7502";
+        body += ",\"udp_port_imu\":7503,\"lidar_mode\":\"512x10\"";
+        body += ",\"udp_profile_lidar\":\"RNG15_RFL8_NIR8\"}";
+        const int code = http.POST(body);
+        Serial.printf("udp_dest -> %s : %d\n", dest.c_str(), code);
         http.end();
       }
       break;

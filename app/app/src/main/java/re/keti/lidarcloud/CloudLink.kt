@@ -25,6 +25,12 @@ import java.util.UUID
  * are lost. That is deliberate on both ends -- a frame with a hole in it is still a picture of
  * the room, while a stream that stalls waiting for a retransmit is not. A frame is handed on when
  * the sequence number changes, whatever arrived by then.
+ *
+ * The buffer is NOT cleared between frames, and that is the difference between a picture and a
+ * flicker. Clearing it meant a lost chunk blanked those columns for a second and then brought
+ * them back, once a second, forever -- the room is still, so the only thing moving on screen was
+ * the loss. Keeping the last value for a column that did not arrive says something true about a
+ * room that has not changed; blanking it says something false.
  */
 class CloudLink(private val context: Context) {
 
@@ -154,7 +160,6 @@ class CloudLink(private val context: Context) {
                 val count = received
                 main.post { onFrame(done, count) }
             }
-            frame = ShortArray(POINTS)
             received = 0
             frameSequence = sequence
         }
