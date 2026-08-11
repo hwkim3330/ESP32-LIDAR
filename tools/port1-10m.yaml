@@ -1,0 +1,19 @@
+# Force switch B port 1 -- the port the receiver hangs off -- down to 10BASE-T.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/port1-10m.yaml \
+#       --transport serial -d /dev/ttyACM2
+#
+# Because the generators cannot fill a 100 Mbit/s port and do not need to. A W5500 is limited by
+# its SPI bus long before its PHY -- perhaps 10 to 20 Mbit/s -- so three boards together still
+# leave a 100M port mostly idle, and an idle port has no queue for a gate to act on.
+#
+# Shrink the port instead. At 10 Mbit/s the sensor's own 3.3 already occupies a third of it, and
+# one generator oversubscribes it. Contention becomes a switch setting rather than a hardware
+# shopping list.
+#
+# Restore with port1-100m.yaml.
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-ethernet-interface:ethernet/auto-negotiation/enable"
+  : false
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-ethernet-interface:ethernet/speed"
+  : 0.01

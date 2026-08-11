@@ -41,7 +41,7 @@ inline void ethEventHandler(void *, esp_event_base_t, int32_t id, void *) {
 // Poll period in milliseconds. One is the floor the driver accepts, and at the sensor's 3.1 ms
 // spacing it means a poll collects one packet rather than four.
 inline bool ethStart(int sck, int miso, int mosi, int cs, int pollPeriodMs, const IPAddress &ip,
-                     const IPAddress &mask, const IPAddress &gateway) {
+                     const IPAddress &mask, const IPAddress &gateway, bool tenMegabit = false) {
   // esp_netif and the lwIP task have to exist before any of this. Arduino normally brings them
   // up inside ETH.begin or WiFi.mode; skipping ETH means asking for them explicitly, and
   // skipping THAT means a null-queue assert the moment the first socket is opened.
@@ -104,7 +104,25 @@ inline bool ethStart(int sck, int miso, int mosi, int cs, int pollPeriodMs, cons
   esp_netif_set_ip_info(gEthNetif, &ipInfo);
 
   if (esp_netif_attach(gEthNetif, esp_eth_new_netif_glue(gEthHandle)) != ESP_OK) return false;
-  return esp_eth_start(gEthHandle) == ESP_OK;
+  if (esp_eth_start(gEthHandle) != ESP_OK) return false;
+
+  // Ten megabit on purpose, and through the driver rather than behind its back: writing PHYCFGR
+  // before esp_eth_start does nothing, because the driver resets the chip during init and the
+  // mode goes with it. Negotiation has to be off before a speed can be forced.
+  //
+  // Why a receiver asks for a slower link: to make its own port contended. Filling 100 Mbit/s
+  // takes about 95 and a W5500 cannot produce a fifth of that -- SPI runs out long before the
+  // PHY -- so generators leave the port idle, and an idle port has no queue for a gate to act
+  // on. At 10 Mbit/s the sensor's 3.3 is already a third of it.
+  if (tenMegabit) {
+    bool negotiate = false;
+    eth_speed_t speed = ETH_SPEED_10M;
+    eth_duplex_t duplex = ETH_DUPLEX_FULL;
+    esp_eth_ioctl(gEthHandle, ETH_CMD_S_AUTONEGO, &negotiate);
+    esp_eth_ioctl(gEthHandle, ETH_CMD_S_SPEED, &speed);
+    esp_eth_ioctl(gEthHandle, ETH_CMD_S_DUPLEX_MODE, &duplex);
+  }
+  return true;
 }
 
 inline bool ethLinkUp() {

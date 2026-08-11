@@ -516,34 +516,46 @@ The firmware keeps the presets and refuses to send them, with the reason next to
 Re-enabling it means the atomic container write and two more SIDs (`admin-base-time` and its
 leaves, `admin-gate-states`) — worth doing, since the point of this board is to need no PC.
 
-## Contention has nowhere to come from (2026-08-11)
+## Contention needs a second board, not a bigger idea (2026-08-11)
 
 The interesting TAS question is not "can a gate delay packets" — that is measured above — but
-"does gating protect one stream from another". That needs two streams competing for the same
-egress port, and on this bench there is no way to arrange it.
+"does gating protect one stream from another". That needs two streams competing for one egress
+port.
 
-**The board cannot supply the competition.** Gates are on egress, so the competing traffic has to
-be *addressed to the board*, and a switch never sends a frame back out the port it arrived on —
-broadcast included. Nothing the board transmits can ever compete with what it receives.
+This README previously said the boards could not supply that competition. **That was wrong, and
+wrong in a way worth writing down**: it is true that *one* board cannot, because gates are on
+egress and a switch never returns a frame out the port it arrived on, so nothing a board sends
+can compete with what that same board receives. From there it concluded the whole thing was
+blocked, which does not follow. **A second board on a second port sends to the first, and that
+contends exactly where it should.** The constraint was never the boards — it was the two data
+ports on a LAN9662, which can only make a chain, and a chain has one source.
 
-**And there is nowhere to plug a generator in.** A LAN9662 has two data ports. Both are taken on
-both switches: the sensor and the link to B on A, that link and this board on B. Two-port switches
-can only make a chain, and a chain has one source.
+So the arrangement is a twelve-port LAN9692 and three boards:
 
-**Raising the sensor does not help either.** 1024x10 is 6.6 Mbit/s on a 100 Mbit/s port. Filling
-that port takes about 95, which only the PC can produce.
+```
+LiDAR      --1G---> [ 9692 ]
+generator  --100M-> [      ] --100M--> receiver        gate this egress port
+second gen --100M-> [      ]
+```
 
-So it needs one of:
+**The generator should be the PC, not a board.** A W5500 runs out of SPI long before it runs out
+of PHY — perhaps 10 to 20 Mbit/s — so filling a 100 Mbit/s receiver port would take five or six
+boards. The PC's adapter does about 95 on its own. `tools/load.sh` puts it on a VLAN with a chosen
+PCP and sends at the receiver on a port the receiver will not mistake for sensor data. Boards can
+be extra sources if more than one priority is wanted.
 
-- **an unmanaged switch where the tap is now**, so the sensor and the PC share A port 2 — cheap,
-  but it costs the tap, which is the only reference for what the sensor actually emits;
-- **the LAN9692**, which has twelve ports and is the RECON target anyway.
+Sending the load on a **different priority from the sensor's** is the whole point. Gate that
+priority and the sensor should come through untouched while the load is shaped — which is what
+TAS is for, and what cannot be shown while the only traffic on the wire is the traffic you care
+about.
 
-`tools/load.sh` is ready for either: it puts the PC's adapter on a VLAN with a chosen PCP and
-sends UDP at the board on a port the board will not mistake for sensor data. Sending the load on
-a different priority from the sensor's is the whole point — gate that priority, and the sensor
-should come through untouched while the load is shaped. That is what TAS is for, and it cannot be
-shown at all while the only traffic on the wire is the traffic you care about.
+**Forcing the receiver's link to 10 Mbit/s was tried and abandoned.** The idea was to make the
+port contended without a fast generator: at 10M the sensor's own 3.3 Mbit/s is already a third of
+it. Writing PHYCFGR before the driver starts does nothing — the driver resets the chip during
+init — and the driver's own `ETH_CMD_S_SPEED` did not take either; the link came back up
+negotiated at 100M. It would not have been worth much anyway: 100M is a real TSN edge speed and
+10M is not, so shaping demonstrated on it would be a demonstration about a toy link. The firmware
+keeps the toggle (`1` on the console) and the bench runs negotiated.
 
 ## Not done yet
 

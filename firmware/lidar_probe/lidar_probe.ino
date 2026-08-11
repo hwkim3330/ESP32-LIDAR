@@ -241,6 +241,42 @@ uint8_t readRegisterRaw(uint16_t addr) {
 
 uint8_t versionr = 0;
 
+// Writing is the same shape as reading with the read/write bit set: BSB 00000, RWB 1, OM 01.
+void writeRegisterRaw(uint16_t addr, uint8_t value) {
+  rawSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(kCs, LOW);
+  rawSpi.transfer(addr >> 8);
+  rawSpi.transfer(addr & 0xFF);
+  rawSpi.transfer(0x05);
+  rawSpi.transfer(value);
+  digitalWrite(kCs, HIGH);
+  rawSpi.endTransaction();
+}
+
+// Force the PHY to ten megabit, or let it negotiate.
+//
+// Why a receiver would ever ask for a slower link: to make the port contended. Filling a 100
+// Mbit/s port needs about 95 Mbit/s and a W5500 cannot produce a fifth of that -- SPI runs out
+// long before the PHY does -- so three boards generating traffic still leave the port idle, and
+// an idle port has no queue for a gate to act on. At 10 Mbit/s the sensor's own 3.3 is already a
+// third of the port and one generator oversubscribes it. Shrinking the port is cheaper than
+// finding traffic, and it is the receiver's own PHY that decides: the switch follows.
+//
+// PHYCFGR: bit 6 OPMD says "use the bits below", bits 5:3 OPMDC select the mode -- 001 is 10BT
+// full duplex with negotiation off, 111 is negotiate everything. Bit 7 is reset, active low, and
+// the mode only takes effect when it is toggled.
+void forcePhyMode(bool tenMegabit) {
+  const uint8_t opmdc = tenMegabit ? 0x01 : 0x07;
+  const uint8_t value = 0x40 | (opmdc << 3);
+  writeRegisterRaw(0x002E, value);          // reset asserted, mode loaded
+  delay(10);
+  writeRegisterRaw(0x002E, value | 0x80);   // released
+  delay(50);
+  Serial.printf("PHY set to %s (PHYCFGR 0x%02X -> 0x%02X)\n",
+                tenMegabit ? "10BASE-T full duplex, no negotiation" : "negotiate everything",
+                value, readRegisterRaw(0x002E));
+}
+
 // ------------------------------------------------------------------------------- HTTP layer
 
 void appendStream(String &out, const char *name, const Flow &s) {
@@ -380,17 +416,22 @@ void setup() {
 
   versionr = readRegisterRaw(0x0039);
   Serial.printf("W5500 VERSIONR 0x%02X (expect 0x04)\n", versionr);
+
+  // Before the driver takes the bus, and only here: after ETH starts, nothing may touch SPI.
+  prefs.begin("lidar", false);
+  const bool tenMegabit = prefs.getBool("link10", false);
   rawSpi.end();
 
   // One millisecond rather than Arduino's ten. See eth_w5500.h: with no interrupt line the
   // driver polls, and the poll period is the resolution of every arrival time this rig records.
-  if (!ethStart(kSck, kMiso, kMosi, kCs, 1, kStaticSelf, kStaticMask, kStaticGateway)) {
+  if (!ethStart(kSck, kMiso, kMosi, kCs, 1, kStaticSelf, kStaticMask, kStaticGateway,
+                tenMegabit)) {
     Serial.println("ethStart failed -- check the pinout above all else");
   }
   delay(500);
-  Serial.printf("ip %s  mac %s\n", ethLocalIP().toString().c_str(), ethMacAddress().c_str());
+  Serial.printf("ip %s  mac %s  link forced to %s\n", ethLocalIP().toString().c_str(),
+                ethMacAddress().c_str(), tenMegabit ? "10M" : "negotiated");
 
-  prefs.begin("lidar", false);
   streamRequested = prefs.getBool("stream", false);
   requestedMode = prefs.getString("mode", requestedMode);
   requestedProfile = prefs.getString("profile", requestedProfile);
@@ -1008,6 +1049,15 @@ void handleConsole() {
       for (int i = 0; i < kTasPresetCount; i++)
         if (which.startsWith(kTasPresets[i].id)) index = i;
       applyTas(index, "1");
+      break;
+    }
+    case '1': {
+      // Toggle and restart, because the PHY mode can only be set before the driver owns the bus.
+      const bool wanted = !prefs.getBool("link10", false);
+      prefs.putBool("link10", wanted);
+      Serial.printf("link will come up at %s after this restart\n", wanted ? "10M" : "100M");
+      delay(200);
+      ESP.restart();
       break;
     }
     case 'm': {
