@@ -436,36 +436,40 @@ So: the board's counts and rates are trustworthy, and for microsecond jitter the
 reference. It matters for what can be measured of TAS — a 12 ms effect is plain in the board's
 numbers, a 200 µs one is only visible on the tap.
 
-### Writing schedules from the board: the list was never the problem
+### Writing schedules from the board: admin lands, adoption does not
 
 The board builds the schedule itself and its bytes are **byte-identical** to what keti-tsn-cli
-produces for the same YAML — checked, not assumed. An earlier version of this section said the
-write landed with an empty operational control list and called it an unexplained difference
-between the transports. **That was a misreading**, and the correction is worth more than the
-claim was.
-
-Asked at the right moment — by the board itself, seconds after writing, rather than by a serial
-fetch that took long enough for the safety net to undo it — the switch says:
+produces for the same YAML — checked in full, not assumed. The precise state after the board
+writes, read over serial:
 
 ```
-B port 1:  gate-enabled=1  cycle=10000000/1000000000  entries=2      out-discards 56103
+admin-control-list:  2 entries, the cycle as asked      <- the write landed
+oper-control-list:   []                                 <- never adopted
+oper-gate-states:    254                                <- TC0 held closed
+config-change-error: 1
+config-change-time:  0                                  <- it never happened
 ```
 
-**The list is there.** Two entries, the cycle as asked. The empty list seen before was the *oper*
-list read at a moment when the schedule had not started or had already been withdrawn. What is
-actually happening is in the last column: **the switch is discarding on that port**, tens of
-thousands of frames, which is why the stream stops rather than merely bunching.
+So the write is not the problem and never was: **the switch refuses to adopt it.** The identical
+bytes from the CLI over serial are adopted and shape cleanly.
 
-So the open question is no longer "why does the write not take" but "why does this schedule cause
-drops from the board when the identical one from the CLI shapes cleanly at 320/s". `out-discards`
-is the counter that says so and it was not being watched — the first thing to read next time.
+Two things this cost, both worth more than the conclusion:
 
-A two-window schedule with **both windows open**, written from the board, is carried without any
-of this: `entries=2`, traffic undisturbed. That separates writing a list from closing a gate, and
-writing a list is fine.
+- **`out-discards` was read as an event when it is a counter since boot.** 56103 looked like the
+  mechanism; measured as a delta while the CLI's schedule ran it is **zero over 25 seconds**, with
+  the rate steady at 319–321/s. Shaping drops nothing. Read deltas.
+- **`entries=2` from the board is the *admin* list, not the oper one**, which briefly looked like
+  evidence that adoption had worked. The two disagree exactly when it matters, which is the whole
+  reason `oper-gate-states` is the thing to check.
 
-Until the rest is understood, schedules that actually close a gate go on over serial
-(`tools/tas-b-10ms.yaml`), which is also the only path that cannot be cut by what it is writing.
+What is still not known is why adoption is refused for the board and not for the CLI. Both base
+times have been tried from the board — zero and a few seconds ahead of the switch's clock — and
+both left the oper list empty. The next thing to read is `config-change-error` immediately after
+the CLI's *successful* write, to see what a working adoption looks like from the same vantage
+point.
+
+Until then, schedules that close a gate go on over serial (`tools/tas-b-10ms.yaml`), which is
+also the only path that cannot be cut by what it is writing.
 
 ### `admin-base-time: 0` is why a schedule will not go away
 
