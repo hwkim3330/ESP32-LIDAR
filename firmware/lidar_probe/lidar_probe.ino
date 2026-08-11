@@ -24,6 +24,7 @@
 #include <WiFi.h>
 
 #include "eth_w5500.h"
+#include "load_task.h"
 #include "cloud_ble.h"
 #include "page.h"
 #include "switch_link.h"
@@ -470,6 +471,7 @@ void setup() {
   Serial.println("BLE up as \"KETI-LIDAR-CLOUD\"");
 
   xTaskCreatePinnedToCore(serverTask, "http", 8192, nullptr, 1, nullptr, 0);
+  loadBegin();
   Serial.printf("FreeRTOS tick %u Hz -- one tick is %u ms, which is why HTTP is the task\n",
                 configTICK_RATE_HZ, 1000 / configTICK_RATE_HZ);
 }
@@ -1045,6 +1047,26 @@ void handleConsole() {
       fetchBeamGeometry();
       break;
     }
+    case 'l': {
+      // l           -> stop
+      // l800        -> 800 frames a second on the default priority
+      // l800:5      -> and on PCP 5
+      const String arg = Serial.readStringUntil('\n');
+      if (!arg.length() || arg.toInt() == 0) {
+        loadRunning = false;
+        Serial.printf("load stopped after %lu frames\n", (unsigned long)loadSent);
+        break;
+      }
+      loadFramesPerSecond = arg.toInt();
+      const int colon = arg.indexOf(':');
+      if (colon > 0) loadPcp = arg.substring(colon + 1).toInt() & 7;
+      loadSent = 0;
+      loadRunning = true;
+      Serial.printf("load: asking for %lu frames/s of %d bytes on PCP %u "
+                    "(the chip tops out near 420/s, about 4 Mbit/s)\n",
+                    (unsigned long)loadFramesPerSecond, kLoadFrameBytes, loadPcp);
+      break;
+    }
     case 'f': {
       // Fetch any SID from the switch and print what comes back. The CLI cannot resolve every
       // module's paths -- mchp-velocitysp-redbox among them -- and a SID is a number, so the
@@ -1234,6 +1256,10 @@ void loop() {
                   ethFullDuplex() ? "full" : "half", (unsigned long)lidar.packets, last.packets,
                   lidar.lastSize, (unsigned long)last.meanInterval,
                   (unsigned long)last.maxInterval, (unsigned long)imu.packets);
+    if (loadRunning)
+      Serial.printf("   load out: %lu frames/s on PCP %u (%lu kbit/s)\n",
+                    (unsigned long)loadRateAchieved, loadPcp,
+                    (unsigned long)(loadRateAchieved * kLoadFrameBytes * 8 / 1000));
     // Printed a cycle late on purpose: the cost of the housekeeping cannot be measured by the
     // housekeeping that reports it, so this is the previous second's figure.
     cloudSendStatus(last.packets, last.meanInterval, last.maxInterval,

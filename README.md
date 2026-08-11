@@ -600,7 +600,25 @@ generator  --100M-> [      ] --100M--> receiver        gate this egress port
 second gen --100M-> [      ]
 ```
 
-**The generator should be the PC, not a board.** A W5500 runs out of SPI long before it runs out
+### The board generates too, from the spare core
+
+`l5000:3` on the console sends tagged frames on PCP 3 from core 0 while core 1 keeps receiving.
+Measured: **400 frames/s of 1200 bytes, 3.84 Mbit/s, steady**, and throughout it the sensor's
+stream stays at 319–321/s with no extra outliers. Generating costs the measurement nothing, which
+is the only reason it is allowed to share the board.
+
+Asking for more does not get more — 800, 2000, 5000 and 10000 frames a second all produce about
+420. `esp_eth_transmit` takes roughly 2.4 ms for a 1200 byte frame and the SPI bus is what runs
+out; with 3.3 Mbit/s arriving at the same time that is about 7.4 Mbit/s through the chip, which
+looks like its practical ceiling. The console reports what went out rather than what was asked
+for, because at the top of the range the two differ by a factor of twenty.
+
+Four megabits will not congest a 100 Mbit/s port, and it does not need to. **Congestion and
+discrimination are different demonstrations**: the first needs a full port and the PC, the second
+needs two priorities and this is enough for it — gate PCP 3 and watch PCP 0 come through beside
+it untouched.
+
+**For congestion, the generator should be the PC, not a board.** A W5500 runs out of SPI long before it runs out
 of PHY — perhaps 10 to 20 Mbit/s — so filling a 100 Mbit/s receiver port would take five or six
 boards. The PC's adapter does about 95 on its own. `tools/load.sh` puts it on a VLAN with a chosen
 PCP and sends at the receiver on a port the receiver will not mistake for sensor data. Boards can
