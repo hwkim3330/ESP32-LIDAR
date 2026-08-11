@@ -2,12 +2,11 @@ package re.keti.lidarcloud
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -21,45 +20,59 @@ import androidx.core.content.ContextCompat
 class MainActivity : AppCompatActivity() {
 
     private lateinit var cloud: CloudView
-    private lateinit var status: TextView
+    private lateinit var hud: Hud
     private lateinit var link: CloudLink
-
-    private var frames = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         cloud = CloudView(this)
-        status = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 13f
-            setPadding(28, 22, 28, 22)
-            text = "starting…"
-        }
+        hud = Hud(this)
+        // The panel reports; the scene is what you touch. Without this the HUD would eat every
+        // drag that started over it, which is the whole left edge of the screen.
+        hud.isClickable = false
+        hud.isFocusable = false
 
         setContentView(FrameLayout(this).apply {
             addView(cloud)
-            addView(status, FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
+            addView(hud, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         })
 
+        cloud.onFrameDrawn = { drawn -> runOnUiThread { hud.pointsDrawn = drawn } }
+
         link = CloudLink(this).apply {
-            onStatus = { status.text = it }
+            onStatus = { hud.status = it; hud.invalidate() }
             onGeometry = { altitudes, azimuths ->
                 cloud.setGeometry(altitudes, azimuths)
-                status.text = "geometry: ${altitudes.size} beams, ${altitudes.first()}° to ${altitudes.last()}°"
+                hud.status = "${altitudes.size} beams, ${altitudes.first()}° to ${altitudes.last()}°"
+                hud.invalidate()
             }
             onFrame = { ranges, received ->
-                frames++
                 cloud.setFrame(ranges)
-                // Received is out of 4096: what actually arrived, not what was sent. Notifications
-                // are lossy by design here and saying so is more useful than hiding it.
-                status.text = "frame $frames · $received/${CloudLink.POINTS} points"
+                hud.onFrame(received, hud.pointsDrawn)
+            }
+            onImu = { accel, gyro -> hud.onImu(accel, gyro) }
+            onWire = { rate, mean, worst, outliers, link ->
+                hud.onWire(rate, mean, worst, outliers, link)
             }
         }
 
         requestPermissionsThenStart()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            window.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                        View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                        View.SYSTEM_UI_FLAG_FULLSCREEN or
+                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                        View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                        View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        }
     }
 
     private fun requestPermissionsThenStart() {
@@ -84,7 +97,8 @@ class MainActivity : AppCompatActivity() {
         if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             link.start()
         } else {
-            status.text = "Bluetooth permission is what this needs; nothing else."
+            hud.status = "Bluetooth permission is what this needs; nothing else."
+            hud.invalidate()
         }
     }
 

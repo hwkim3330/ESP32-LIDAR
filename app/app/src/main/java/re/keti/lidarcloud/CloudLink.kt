@@ -15,7 +15,6 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import org.json.JSONObject
 import java.util.UUID
 
 /**
@@ -38,6 +37,8 @@ class CloudLink(private val context: Context) {
         val SERVICE: UUID = UUID.fromString("6b1e0001-4b2a-4f6d-9c3a-0f1e2d3c4b5a")
         val FRAME: UUID = UUID.fromString("6b1e0002-4b2a-4f6d-9c3a-0f1e2d3c4b5a")
         val GEOMETRY: UUID = UUID.fromString("6b1e0003-4b2a-4f6d-9c3a-0f1e2d3c4b5a")
+        val IMU: UUID = UUID.fromString("6b1e0005-4b2a-4f6d-9c3a-0f1e2d3c4b5a")
+        val STATUS: UUID = UUID.fromString("6b1e0004-4b2a-4f6d-9c3a-0f1e2d3c4b5a")
         val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         const val BEAMS = 16
@@ -48,6 +49,10 @@ class CloudLink(private val context: Context) {
     var onStatus: (String) -> Unit = {}
     var onGeometry: (FloatArray, FloatArray) -> Unit = { _, _ -> }
     var onFrame: (ShortArray, Int) -> Unit = { _, _ -> }
+    var onImu: (FloatArray, FloatArray) -> Unit = { _, _ -> }
+
+    /** What the board sees arriving on the wire: rate, mean gap, worst gap, outliers, link. */
+    var onWire: (Int, Int, Int, Int, Int) -> Unit = { _, _, _, _, _ -> }
 
     private val main = Handler(Looper.getMainLooper())
     private var gatt: BluetoothGatt? = null
@@ -105,47 +110,93 @@ class CloudLink(private val context: Context) {
                 g.readCharacteristic(service.getCharacteristic(GEOMETRY))
             }
 
+            override fun onDescriptorWrite(
+                g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int
+            ) {
+                subscribeNext(g)
+            }
+
             override fun onCharacteristicRead(
                 g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int
             ) {
                 @Suppress("DEPRECATION")
                 if (c.uuid == GEOMETRY) {
                     @Suppress("DEPRECATION")
-                    parseGeometry(String(c.value ?: ByteArray(0)))
+                    parseGeometry(c.value ?: ByteArray(0))
                     subscribe(g)
                 }
             }
 
             @Suppress("DEPRECATION")
             override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
-                if (c.uuid == FRAME) acceptChunk(c.value ?: return)
+                val value = c.value ?: return
+                when (c.uuid) {
+                    FRAME -> acceptChunk(value)
+                    IMU -> acceptImu(value)
+                    STATUS -> acceptStatus(value)
+                }
             }
         }, BluetoothDevice.TRANSPORT_LE)
     }
 
+    // One descriptor write at a time: the stack has a single outstanding-operation slot and a
+    // second write issued before the first completes is dropped without an error anywhere.
+    private val pendingSubscriptions = ArrayDeque<UUID>()
+
     @SuppressLint("MissingPermission")
     private fun subscribe(g: BluetoothGatt) {
-        val characteristic = g.getService(SERVICE).getCharacteristic(FRAME)
+        pendingSubscriptions.addAll(listOf(FRAME, IMU, STATUS))
+        subscribeNext(g)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun subscribeNext(g: BluetoothGatt) {
+        val next = pendingSubscriptions.removeFirstOrNull() ?: run { say("taking frames"); return }
+        val characteristic = g.getService(SERVICE).getCharacteristic(next) ?: return subscribeNext(g)
         g.setCharacteristicNotification(characteristic, true)
-        val cccd = characteristic.getDescriptor(CCCD)
+        val cccd = characteristic.getDescriptor(CCCD) ?: return subscribeNext(g)
         @Suppress("DEPRECATION")
         cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
         @Suppress("DEPRECATION")
         g.writeDescriptor(cccd)
-        say("taking frames")
     }
 
-    private fun parseGeometry(json: String) {
-        try {
-            val root = JSONObject(json)
-            val altitudes = root.getJSONArray("beam_altitude_angles")
-            val azimuths = root.getJSONArray("beam_azimuth_angles")
-            val a = FloatArray(altitudes.length()) { altitudes.getDouble(it).toFloat() }
-            val z = FloatArray(azimuths.length()) { azimuths.getDouble(it).toFloat() }
-            main.post { onGeometry(a, z) }
-        } catch (e: Exception) {
-            say("geometry did not parse: ${e.message}")
+    private fun acceptStatus(data: ByteArray) {
+        if (data.size < 14) return
+        val b = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val rate = b.getShort(0).toInt() and 0xFFFF
+        val mean = b.getInt(2)
+        val worst = b.getInt(6)
+        val outliers = b.getShort(10).toInt() and 0xFFFF
+        val link = b.getShort(12).toInt() and 0xFFFF
+        main.post { onWire(rate, mean, worst, outliers, link) }
+    }
+
+    private fun acceptImu(data: ByteArray) {
+        if (data.size < 24) return
+        val buffer = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val accel = FloatArray(3) { buffer.getFloat(it * 4) }
+        val gyro = FloatArray(3) { buffer.getFloat(12 + it * 4) }
+        main.post { onImu(accel, gyro) }
+    }
+
+    /**
+     * Thirty-two little-endian floats: sixteen altitude angles then sixteen azimuth offsets.
+     *
+     * It used to be the sensor's JSON, and that was a real bug rather than a style choice. The
+     * document is 678 bytes, a characteristic read returns at most 512, so what arrived was a
+     * truncated document that failed to parse -- leaving every altitude angle at zero, which puts
+     * every point at z = 0 and draws a room as a perfectly flat disc.
+     */
+    private fun parseGeometry(data: ByteArray) {
+        if (data.size < BEAMS * 2 * 4) {
+            say("geometry is ${data.size} bytes, expected ${BEAMS * 2 * 4}")
+            return
         }
+        val b = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val altitudes = FloatArray(BEAMS) { b.getFloat(it * 4) }
+        val azimuths = FloatArray(BEAMS) { b.getFloat((BEAMS + it) * 4) }
+        main.post { onGeometry(altitudes, azimuths) }
     }
 
     private fun acceptChunk(data: ByteArray) {

@@ -1,0 +1,17 @@
+# Turn gating off outright on switch B port 1.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/tas-b-off.yaml \
+#       --transport serial -d /dev/ttyACM2
+#
+# Written after an all-open schedule failed to be adopted: the admin list read back as a single
+# 255 window, and the switch still ran the old 10 ms one with `config-change-error: 1`. Writing a
+# new schedule is a request the device can refuse; disabling the gates is not a schedule at all,
+# and 802.1Q says an unscheduled port passes everything.
+#
+# Check oper-gate-states afterwards, not just the write's return code. The admin list is what was
+# asked for; oper is what the port is doing.
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/gate-enabled"
+  : false
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/config-change"
+  : true

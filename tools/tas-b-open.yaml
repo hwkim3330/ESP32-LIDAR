@@ -1,0 +1,24 @@
+# Force every gate open on port 1 -- the way back from any schedule.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/tas-open.yaml \
+#       --transport serial -d /dev/ttyACM2
+#
+# Note what this does NOT do: set gate-enabled false. Gating stays on with a single all-open
+# window, which is the state that reliably restores traffic. gate-enabled:false alone did not.
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table"
+  : gate-enabled: true
+    admin-gate-states: 255
+    admin-cycle-time:
+      numerator: 1000000
+      denominator: 1000000000
+    admin-base-time:
+      seconds: 0
+      nanoseconds: 0
+    admin-control-list:
+      gate-control-entry:
+        - index: 0
+          operation-name: set-gate-states
+          gate-states-value: 255
+          time-interval-value: 1000000
+    config-change: true

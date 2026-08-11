@@ -519,6 +519,7 @@ void drain(NetworkUDP &udp, Flow &s, bool timed) {
       s.sawFirst = true;
     }
     if (timed && read >= 1280) assembleColumns(packet, read);
+    if (!timed && &s == &imu && read >= 48) decodeImu(packet, read);
     if (timed && dumpNextPacket && read >= 1280) {
       dumpNextPacket = false;
       decodePacket(packet, read);
@@ -707,6 +708,45 @@ void readPorts() {
   }
 }
 
+// The app cannot place a single point without the beam angles, and they are per-unit
+// calibration rather than a model constant, so they are read from the sensor.
+//
+// Sent as numbers, not as the JSON they arrive in. The JSON is 678 bytes and a BLE characteristic
+// read tops out at 512, so the app received a truncated document, failed to parse it, and kept
+// its altitude angles at zero -- which puts every point at z = 0 and draws a room as a perfectly
+// flat disc. Thirty-two floats is 128 bytes and cannot be truncated.
+bool fetchBeamGeometry() {
+  HTTPClient http;
+  http.setTimeout(6000);
+  if (!http.begin("http://" + kSensorAddress.toString() +
+                  "/api/v1/sensor/metadata/beam_intrinsics")) return false;
+  const int code = http.GET();
+  const String body = http.getString();
+  http.end();
+  if (code != 200) { Serial.printf("beam_intrinsics %d\n", code); return false; }
+
+  float angles[2 * kCloudBeams] = {0};
+  const char *keys[2] = {"beam_altitude_angles", "beam_azimuth_angles"};
+  for (int k = 0; k < 2; k++) {
+    const int at = body.indexOf(keys[k]);
+    if (at < 0) return false;
+    int i = body.indexOf('[', at);
+    const int end = body.indexOf(']', i);
+    for (int b = 0; b < kCloudBeams && i > 0 && i < end; b++) {
+      i++;
+      while (i < end && (body[i] == ' ' || body[i] == ',')) i++;
+      angles[k * kCloudBeams + b] = body.substring(i, end).toFloat();
+      i = body.indexOf(',', i);
+      if (i < 0 || i > end) break;
+    }
+  }
+  geometryCharacteristic->setValue((uint8_t *)angles, sizeof(angles));
+  Serial.printf("beam geometry: altitude %.2f..%.2f, azimuth %.2f..%.2f (%u bytes published)\n",
+                angles[0], angles[kCloudBeams - 1], angles[kCloudBeams],
+                angles[2 * kCloudBeams - 1], sizeof(angles));
+  return true;
+}
+
 // The serial console is the only way in until something is on the WiFi AP, and it is also the
 // right place for the one action that changes the sensor rather than observing it. Asking for
 // the stream is deliberately a keypress and not something that happens on its own: it puts the
@@ -880,44 +920,18 @@ void handleConsole() {
       break;
     }
     case 'G': {
-      // The app cannot place a single point without these. Fetched from the sensor rather than
-      // assumed, because beam angles are per-unit calibration, not a model constant.
-      HTTPClient http;
-      http.setTimeout(6000);
-      if (http.begin("http://" + kSensorAddress.toString() +
-                     "/api/v1/sensor/metadata/beam_intrinsics")) {
-        const int code = http.GET();
-        const String body = http.getString();
-        Serial.printf("beam_intrinsics %d (%u bytes)\n", code, body.length());
-        if (code == 200) {
-          geometryCharacteristic->setValue(body.c_str());
-          Serial.println("published to the BLE geometry characteristic");
-          for (unsigned i = 0; i < body.length(); i += 512) Serial.println(body.substring(i, i + 512));
-        }
-        http.end();
-      }
+      fetchBeamGeometry();
       break;
     }
-    case 'u': {
-      // Send the stream somewhere else -- to a tablet on a USB Ethernet adapter, for instance.
-      // Once the sensor addresses the tablet directly, its packets are the tablet's own traffic
-      // and an ordinary UDP socket receives them: no root, no packet capture, and none of the
-      // bandwidth ceiling that BLE imposes. The adapter has to hang off a switch port rather
-      // than off the sensor, because a 100M adapter cannot give an OS1 the gigabit link it
-      // refuses to transmit without.
-      const String dest = Serial.readStringUntil('\n');
-      if (dest.length() < 7) { Serial.println("usage: u192.168.1.60"); break; }
-      HTTPClient http;
-      http.setTimeout(8000);
-      if (http.begin("http://" + kSensorAddress.toString() + "/api/v1/sensor/config")) {
-        http.addHeader("Content-Type", "application/json");
-        String body = "{\"udp_dest\":\"" + dest + "\",\"udp_port_lidar\":7502";
-        body += ",\"udp_port_imu\":7503,\"lidar_mode\":\"512x10\"";
-        body += ",\"udp_profile_lidar\":\"RNG15_RFL8_NIR8\"}";
-        const int code = http.POST(body);
-        Serial.printf("udp_dest -> %s : %d\n", dest.c_str(), code);
-        http.end();
-      }
+    case 'm': {
+      // Raise the resolution, staying on the low data rate profile. That profile is the whole
+      // reason this is safe: its payload is 1280 bytes, which fits a frame, so more columns mean
+      // more packets rather than more fragments. The full profile at 3392 bytes fragments into
+      // three, and it was the fragment rate -- not the data rate -- that drowned this board.
+      const String mode = Serial.readStringUntil('\n');
+      if (mode.length() < 5) { Serial.println("usage: m1024x10"); break; }
+      Serial.printf("configuring %s, low data rate\n", mode.c_str());
+      configureSensor(mode.c_str(), "RNG15_RFL8_NIR8");
       break;
     }
     case 'd': {
@@ -997,6 +1011,9 @@ void serverTask(void *) {
     // Frames go out from here rather than from loop(): sending one is 35 notifications with a
     // deliberate pause between them, and loop() is the thread that must not pause.
     cloudSendFrame();
+    static int64_t lastImu = 0;
+    const int64_t now = esp_timer_get_time();
+    if (now - lastImu > 100000) { lastImu = now; cloudSendImu(); }
     server.handleClient();
     const int64_t spent = esp_timer_get_time() - start;
     if (spent > worstServe) worstServe = spent;
@@ -1026,6 +1043,11 @@ void loop() {
     // thirty seconds, and never before giving it twenty to start on its own. A sensor that is
     // restarting will simply refuse, which costs one failed connection.
     if (lidar.packets != packetsAtLastCheck) { packetsAtLastCheck = lidar.packets; quietSince = now; }
+    // Once, as soon as there is a stream to place: the app is useless without it and nobody
+    // should have to remember a keypress for something the board can tell it is time to do.
+    static bool geometryPublished = false;
+    if (!geometryPublished && lidar.packets > 100) geometryPublished = fetchBeamGeometry();
+
     if (streamRequested && quietSince && now - quietSince > 20000000 &&
         now - lastReapply > 30000000) {
       lastReapply = now;
@@ -1043,6 +1065,8 @@ void loop() {
                   (unsigned long)last.maxInterval, (unsigned long)imu.packets);
     // Printed a cycle late on purpose: the cost of the housekeeping cannot be measured by the
     // housekeeping that reports it, so this is the previous second's figure.
+    cloudSendStatus(last.packets, last.meanInterval, last.maxInterval,
+                    uint16_t(lastOutliers), ethLinkSpeed());
     Serial.printf("   gaps over %u us: %lu | min gap %lu us | burst %d%s | serve %ld us | house %ld us\n",
                   kOutlierThresholdUs, (unsigned long)lastOutliers,
                   (unsigned long)lastMinInterval, maxBurst,

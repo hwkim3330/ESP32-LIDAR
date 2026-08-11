@@ -22,6 +22,7 @@
 #define KETI_CLOUD_FRAME   "6b1e0002-4b2a-4f6d-9c3a-0f1e2d3c4b5a"  // notify: frame chunks
 #define KETI_CLOUD_GEOM    "6b1e0003-4b2a-4f6d-9c3a-0f1e2d3c4b5a"  // read: beam geometry JSON
 #define KETI_CLOUD_STATUS  "6b1e0004-4b2a-4f6d-9c3a-0f1e2d3c4b5a"  // read/notify: one status line
+#define KETI_CLOUD_IMU     "6b1e0005-4b2a-4f6d-9c3a-0f1e2d3c4b5a"  // notify: accel + gyro
 
 constexpr int kCloudBeams = 16;
 constexpr int kCloudColumns = 512;   // one full revolution at 512x10
@@ -37,6 +38,14 @@ BLEServer *cloudServer = nullptr;
 BLECharacteristic *frameCharacteristic = nullptr;
 BLECharacteristic *geometryCharacteristic = nullptr;
 BLECharacteristic *statusCharacteristic = nullptr;
+BLECharacteristic *imuCharacteristic = nullptr;
+
+// The sensor's IMU, latest reading. Six floats is 24 bytes, so unlike the cloud it costs nothing
+// to send -- the reason it goes at 10 Hz rather than the sensor's 100 is that a number changing
+// a hundred times a second is unreadable, not that the link could not carry it.
+volatile float imuAccel[3] = {0, 0, 0};
+volatile float imuGyro[3] = {0, 0, 0};
+volatile bool imuFresh = false;
 volatile bool cloudConnected = false;
 
 class CloudServerCallbacks : public BLEServerCallbacks {
@@ -64,12 +73,53 @@ inline void cloudBleBegin(const char *name) {
   statusCharacteristic = service->createCharacteristic(
       KETI_CLOUD_STATUS, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   statusCharacteristic->addDescriptor(new BLE2902());
+  imuCharacteristic = service->createCharacteristic(
+      KETI_CLOUD_IMU, BLECharacteristic::PROPERTY_NOTIFY);
+  imuCharacteristic->addDescriptor(new BLE2902());
   service->start();
 
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(KETI_CLOUD_SERVICE);
   advertising->setScanResponse(true);
   BLEDevice::startAdvertising();
+}
+
+// Ouster's IMU packet is 48 bytes: three 8-byte timestamps, then three float32 accelerations in
+// g at offset 24 and three float32 angular rates in degrees per second at 36.
+inline void decodeImu(const uint8_t *p, int length) {
+  if (length < 48) return;
+  memcpy((void *)imuAccel, p + 24, 12);
+  memcpy((void *)imuGyro, p + 36, 12);
+  imuFresh = true;
+}
+
+// What the board sees on the wire, once a second, so the tablet can graph the link rather than
+// only the picture: rate, mean gap, worst gap, outliers, link speed. Sixteen bytes.
+inline void cloudSendStatus(uint16_t rate, uint32_t meanGapUs, uint32_t maxGapUs,
+                            uint16_t outliers, uint16_t linkMbit) {
+  if (!cloudConnected) return;
+  uint8_t payload[16];
+  int n = 0;
+  payload[n++] = rate; payload[n++] = rate >> 8;
+  payload[n++] = meanGapUs; payload[n++] = meanGapUs >> 8;
+  payload[n++] = meanGapUs >> 16; payload[n++] = meanGapUs >> 24;
+  payload[n++] = maxGapUs; payload[n++] = maxGapUs >> 8;
+  payload[n++] = maxGapUs >> 16; payload[n++] = maxGapUs >> 24;
+  payload[n++] = outliers; payload[n++] = outliers >> 8;
+  payload[n++] = linkMbit; payload[n++] = linkMbit >> 8;
+  payload[n++] = 0; payload[n++] = 0;
+  statusCharacteristic->setValue(payload, n);
+  statusCharacteristic->notify();
+}
+
+inline void cloudSendImu() {
+  if (!cloudConnected || !imuFresh) return;
+  imuFresh = false;
+  uint8_t payload[24];
+  memcpy(payload, (const void *)imuAccel, 12);
+  memcpy(payload + 12, (const void *)imuGyro, 12);
+  imuCharacteristic->setValue(payload, sizeof(payload));
+  imuCharacteristic->notify();
 }
 
 // A frame goes out as chunks of a fixed shape, so the app can drop a lost one without losing the

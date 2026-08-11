@@ -1,0 +1,29 @@
+# All gates open on switch B port 1, with a base time the switch will accept.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/tas-b-open-timed.yaml \
+#       --transport serial -d /dev/ttyACM2
+#
+# The all-open restore with `admin-base-time: 0` was written, read back correctly in the admin
+# list, and then refused: `config-change-error: 1`, with the port still running the previous
+# schedule. A base time of zero is in the past, and a schedule cannot start in the past. Read
+# current-time from the same table and put the base time a few seconds ahead of it.
+#
+# The value below is set from the switch's own clock at the time of writing; if the switch has
+# been restarted since, read current-time again and move it forward.
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table"
+  : gate-enabled: true
+    admin-gate-states: 255
+    admin-cycle-time:
+      numerator: 1000000
+      denominator: 1000000000
+    admin-base-time:
+      seconds: 4830
+      nanoseconds: 0
+    admin-control-list:
+      gate-control-entry:
+        - index: 0
+          operation-name: set-gate-states
+          gate-states-value: 255
+          time-interval-value: 1000000
+    config-change: true

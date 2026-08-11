@@ -21,8 +21,16 @@ import kotlin.math.sin
  * three floats where it now sends one short -- six times the bytes over a link that is the scarce
  * thing. The angles it takes to do the conversion are the sensor's own calibration, read once.
  *
- * Colour is height, not distance. Distance is already legible from the geometry itself, whereas
- * height is what separates floor from desk from ceiling in a room scan.
+ * Three things make a point cloud read as three-dimensional rather than as a flat scatter, and
+ * all three are here: a ground grid to sit on, axes at the sensor to say where the origin is, and
+ * point size that falls off with distance so near and far separate.
+ *
+ * Colour is distance from the sensor. Height was tried first and came out almost monochrome, for
+ * a reason worth keeping: most of what a floor-standing OS1-16 returns is floor, so most points
+ * sit within a few centimetres of each other in z while a handful of wall and ceiling returns
+ * stretch the range. Distance has no such pile-up -- every concentric ring the beams cut into the
+ * floor lands on its own part of the ramp, which is also exactly the structure a person looking
+ * at the room wants to see.
  */
 class CloudView(context: Context) : GLSurfaceView(context) {
 
@@ -38,6 +46,10 @@ class CloudView(context: Context) : GLSurfaceView(context) {
         renderer.setGeometry(altitudes, azimuths)
 
     fun setFrame(ranges: ShortArray) = renderer.setFrame(ranges)
+
+    var onFrameDrawn: (Int) -> Unit
+        get() = renderer.onFrameDrawn
+        set(value) { renderer.onFrameDrawn = value }
 
     private var lastX = 0f
     private var lastY = 0f
@@ -83,6 +95,18 @@ class CloudRenderer : GLSurfaceView.Renderer {
     private var pitch = 25f
     private var distance = 18f
 
+    var onFrameDrawn: (Int) -> Unit = {}
+
+    // Distance range of the current frame, smoothed so the colours do not jump between frames.
+    private var lowZ = 0.5f
+    private var highZ = 10f
+
+    private var gridBuffer: FloatBuffer = ByteBuffer.allocateDirect(4)
+        .order(ByteOrder.nativeOrder()).asFloatBuffer()
+    private var gridVertices = 0
+    private var axisBuffer: FloatBuffer = ByteBuffer.allocateDirect(4)
+        .order(ByteOrder.nativeOrder()).asFloatBuffer()
+
     // Three floats per point, rebuilt whenever a frame lands.
     private var vertices: FloatBuffer =
         ByteBuffer.allocateDirect(CloudLink.POINTS * 3 * 4)
@@ -92,6 +116,7 @@ class CloudRenderer : GLSurfaceView.Renderer {
     private var altitudes = FloatArray(CloudLink.BEAMS) { 0f }
     private var azimuths = FloatArray(CloudLink.BEAMS) { 0f }
     private var pendingRanges: ShortArray? = null
+    private val heightSample = FloatArray(CloudLink.POINTS / 4 + 1)
 
     fun setGeometry(a: FloatArray, z: FloatArray) {
         if (a.size >= CloudLink.BEAMS) altitudes = a
@@ -110,28 +135,58 @@ class CloudRenderer : GLSurfaceView.Renderer {
     private val vertexShader = """
         uniform mat4 uMvp;
         uniform float uPointSize;
+        uniform vec2 uRange;
         attribute vec4 aPosition;
-        varying float vHeight;
+        varying float vT;
+        varying float vFade;
         void main() {
-            gl_Position = uMvp * aPosition;
-            gl_PointSize = uPointSize;
-            vHeight = aPosition.z;
+            vec4 clip = uMvp * aPosition;
+            gl_Position = clip;
+            // Nearer points are bigger. Depth cueing does more for reading a cloud as a volume
+            // than any amount of shading, and it costs one divide.
+            gl_PointSize = clamp(uPointSize * 16.0 / max(clip.w, 1.0), 2.0, 12.0);
+            float d = length(aPosition.xyz);
+            vT = clamp((d - uRange.x) / max(uRange.y - uRange.x, 0.5), 0.0, 1.0);
+            vFade = clamp(1.4 - clip.w / 40.0, 0.35, 1.0);
         }
     """
 
-    // Height to colour, blue low to warm high, with a grey floor for anything near zero.
+    // Four stops rather than three, and the same hues the board's own page uses for series, so
+    // the two things in this project that draw data do not disagree about what blue means.
     private val fragmentShader = """
         precision mediump float;
-        varying float vHeight;
+        varying float vT;
+        varying float vFade;
         void main() {
-            float t = clamp((vHeight + 2.0) / 5.0, 0.0, 1.0);
-            vec3 low  = vec3(0.16, 0.47, 0.84);
-            vec3 mid  = vec3(0.10, 0.69, 0.48);
-            vec3 high = vec3(0.92, 0.41, 0.20);
-            vec3 c = t < 0.5 ? mix(low, mid, t * 2.0) : mix(mid, high, (t - 0.5) * 2.0);
-            gl_FragColor = vec4(c, 1.0);
+            vec3 a = vec3(0.16, 0.47, 0.84);
+            vec3 b = vec3(0.10, 0.62, 0.72);
+            vec3 c = vec3(0.10, 0.69, 0.44);
+            vec3 d = vec3(0.92, 0.63, 0.10);
+            vec3 e = vec3(0.90, 0.35, 0.20);
+            float t = vT * 4.0;
+            vec3 col = t < 1.0 ? mix(a, b, t)
+                     : t < 2.0 ? mix(b, c, t - 1.0)
+                     : t < 3.0 ? mix(c, d, t - 2.0)
+                               : mix(d, e, t - 3.0);
+            gl_FragColor = vec4(col * vFade, 1.0);
         }
     """
+
+    // The grid and the axes share the point program; a flat colour is a range that cannot move.
+    private val flatVertex = """
+        uniform mat4 uMvp;
+        attribute vec4 aPosition;
+        void main() { gl_Position = uMvp * aPosition; gl_PointSize = 1.0; }
+    """
+    private val flatFragment = """
+        precision mediump float;
+        uniform vec4 uColour;
+        void main() { gl_FragColor = uColour; }
+    """
+    private var flatProgram = 0
+    private var flatPosition = 0
+    private var flatMatrix = 0
+    private var flatColour = 0
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0.05f, 0.05f, 0.06f, 1f)
@@ -140,19 +195,56 @@ class CloudRenderer : GLSurfaceView.Renderer {
         positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
         matrixHandle = GLES20.glGetUniformLocation(program, "uMvp")
         pointSizeHandle = GLES20.glGetUniformLocation(program, "uPointSize")
+        rangeHandle = GLES20.glGetUniformLocation(program, "uRange")
+
+        flatProgram = link(flatVertex, flatFragment)
+        flatPosition = GLES20.glGetAttribLocation(flatProgram, "aPosition")
+        flatMatrix = GLES20.glGetUniformLocation(flatProgram, "uMvp")
+        flatColour = GLES20.glGetUniformLocation(flatProgram, "uColour")
+        buildGrid()
+    }
+
+    private var rangeHandle = 0
+
+    /** A 20 m floor in 1 m squares, and three axis lines at the sensor. */
+    private fun buildGrid() {
+        val half = 10
+        val lines = ArrayList<Float>()
+        for (i in -half..half) {
+            val v = i.toFloat()
+            lines.addAll(listOf(-half.toFloat(), v, 0f, half.toFloat(), v, 0f))
+            lines.addAll(listOf(v, -half.toFloat(), 0f, v, half.toFloat(), 0f))
+        }
+        gridBuffer = ByteBuffer.allocateDirect(lines.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        lines.forEach { gridBuffer.put(it) }
+        gridVertices = lines.size / 3
+
+        val axes = floatArrayOf(
+            0f, 0f, 0f, 2f, 0f, 0f,
+            0f, 0f, 0f, 0f, 2f, 0f,
+            0f, 0f, 0f, 0f, 0f, 2f
+        )
+        axisBuffer = ByteBuffer.allocateDirect(axes.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        axes.forEach { axisBuffer.put(it) }
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        GLES20.glViewport(0, 0, width, height)
-        val aspect = width.toFloat() / height.toFloat()
-        Matrix.perspectiveM(projection, 0, 55f, aspect, 0.2f, 200f)
+        // Guarded, because going immersive resizes the surface and one of those callbacks can
+        // arrive with a height of zero. An infinite aspect ratio does not throw -- it produces a
+        // projection that squashes the whole scene onto a single horizontal line, which looks
+        // like the renderer broke rather than like a division by zero.
+        val w = maxOf(width, 1)
+        val h = maxOf(height, 1)
+        GLES20.glViewport(0, 0, w, h)
+        Matrix.perspectiveM(projection, 0, 55f, w.toFloat() / h.toFloat(), 0.2f, 200f)
     }
 
     override fun onDrawFrame(gl: GL10?) {
         pendingRanges?.let { rebuild(it); pendingRanges = null }
 
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-        if (vertexCount == 0) return
 
         val yawR = Math.toRadians(yaw.toDouble())
         val pitchR = Math.toRadians(pitch.toDouble())
@@ -162,9 +254,26 @@ class CloudRenderer : GLSurfaceView.Renderer {
         Matrix.setLookAtM(view, 0, eyeX, eyeY, eyeZ, 0f, 0f, 0f, 0f, 0f, 1f)
         Matrix.multiplyMM(mvp, 0, projection, 0, view, 0)
 
+        // Ground first, so points sit on it rather than in front of it.
+        GLES20.glUseProgram(flatProgram)
+        GLES20.glUniformMatrix4fv(flatMatrix, 1, false, mvp, 0)
+        GLES20.glUniform4f(flatColour, 0.16f, 0.16f, 0.17f, 1f)
+        gridBuffer.position(0)
+        GLES20.glVertexAttribPointer(flatPosition, 3, GLES20.GL_FLOAT, false, 0, gridBuffer)
+        GLES20.glEnableVertexAttribArray(flatPosition)
+        GLES20.glDrawArrays(GLES20.GL_LINES, 0, gridVertices)
+        GLES20.glUniform4f(flatColour, 0.45f, 0.45f, 0.42f, 1f)
+        axisBuffer.position(0)
+        GLES20.glVertexAttribPointer(flatPosition, 3, GLES20.GL_FLOAT, false, 0, axisBuffer)
+        GLES20.glDrawArrays(GLES20.GL_LINES, 0, 6)
+        GLES20.glDisableVertexAttribArray(flatPosition)
+
+        if (vertexCount == 0) return
+
         GLES20.glUseProgram(program)
         GLES20.glUniformMatrix4fv(matrixHandle, 1, false, mvp, 0)
         GLES20.glUniform1f(pointSizeHandle, 4f)
+        GLES20.glUniform2f(rangeHandle, lowZ, highZ)
         vertices.position(0)
         GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, vertices)
         GLES20.glEnableVertexAttribArray(positionHandle)
@@ -180,6 +289,7 @@ class CloudRenderer : GLSurfaceView.Renderer {
     private fun rebuild(ranges: ShortArray) {
         vertices.position(0)
         var n = 0
+        var sampled = 0
         for (column in 0 until CloudLink.COLUMNS) {
             val turn = column.toFloat() / CloudLink.COLUMNS
             for (beam in 0 until CloudLink.BEAMS) {
@@ -191,11 +301,23 @@ class CloudRenderer : GLSurfaceView.Renderer {
                 val horizontal = r * cos(phi).toFloat()
                 vertices.put((horizontal * cos(theta)).toFloat())
                 vertices.put((horizontal * sin(theta)).toFloat())
-                vertices.put((r * sin(phi)).toFloat())
+                val z = (r * sin(phi)).toFloat()
+                vertices.put(z)
+                if (n % 4 == 0 && sampled < heightSample.size) heightSample[sampled++] = r
                 n++
             }
         }
         vertexCount = n
+        if (sampled > 20) {
+            // Percentiles, not extremes: a single return down a corridor is thirty metres away
+            // and would push every point in the room into the first tenth of the ramp.
+            java.util.Arrays.sort(heightSample, 0, sampled)
+            val low = heightSample[sampled * 5 / 100]
+            val high = heightSample[sampled * 95 / 100]
+            lowZ += (low - lowZ) * 0.25f
+            highZ += (high - highZ) * 0.25f
+        }
+        onFrameDrawn(n)
     }
 
     private fun link(vertex: String, fragment: String): Int {

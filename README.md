@@ -376,7 +376,50 @@ A fixed minimum gap was the tell in hindsight: real traffic does not arrive the 
 apart to the microsecond, second after second. That number was never the network. It was how
 long this board takes to read one packet.
 
-## TAS: measured, and it showed nothing (2026-08-11)
+## TAS, seen (2026-08-11)
+
+Gating **switch B port 1** — the last hop, the port the board actually receives through, because
+gates are on egress — with a 10 ms cycle: 5 ms every class open, 5 ms with TC0 closed.
+
+| | gates open | TC0 closed 5 ms in 10 |
+|---|---|---|
+| rate | 319-321/s | 319-323/s |
+| mean gap | 3134 µs | 3134 µs |
+| worst gap | 8.0 ms | **12.4 ms** |
+| **gaps over 6250 µs, per second** | **0-1** | **96-101** |
+| smallest gap | 293 µs | **187 µs** |
+
+That is shaping, and the shape of the evidence is the point: **the rate and the mean do not
+move** — nothing is lost, the sensor still sends 320 a second — while the distribution is
+transformed. About a hundred long gaps a second is one per 10 ms cycle, and the packets held
+during the closed window come out back to back at 187 µs. Average unchanged, arrival pattern
+rewritten.
+
+The earlier attempt saw nothing because its cycle was 1 ms with 200 µs closed, finer than the
+3125 µs spacing it was trying to shape: nothing ever queued. **Shaping is only visible when the
+window is coarser than the arrivals.**
+
+### `admin-base-time: 0` is why a schedule will not go away
+
+Restoring all-open afterwards appeared to work — the write returned success and the admin list
+read back as a single 255 window — and the stream stayed dead. The table said why:
+
+```
+config-change-error: 1        <- the change was refused
+oper-gate-states:    254      <- TC0 still closed, old schedule still running
+oper cycle numerator: 10000000
+```
+
+A base time of zero is in the past and a schedule cannot start in the past, so the switch takes
+the new admin configuration and declines to adopt it. Read `current-time` from the same table,
+put `admin-base-time` a few seconds ahead, and it is accepted: `config-change-error: 0`,
+`oper-gate-states: 255`, stream back at 320/s. `tools/tas-b-open-timed.yaml`.
+
+Two habits come out of this. **Check `oper-gate-states`, not the write's return code** — the
+admin list is what was asked for, oper is what the port is doing. And **`gate-enabled: false` is
+not a way out**: it was accepted, cleared the error, and left the port still closed to TC0.
+
+## The earlier TAS attempt, which showed nothing (2026-08-11)
 
 A 1 ms cycle with 800 us all-open and 200 us of TC0 closed, written to port 1, against the
 sensor's stream:
