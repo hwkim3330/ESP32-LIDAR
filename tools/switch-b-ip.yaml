@@ -1,0 +1,25 @@
+# Move the second LAN9662 off the address the first one already has.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/switch-b-ip.yaml \
+#       --transport serial -d /dev/ttyACM2
+#
+# Both boards came up on 192.168.1.10 -- the second inherits the setup the first was given, and
+# nothing on the device objects. Their L3V1 MACs differ (76-52-8C-CB-DB-00 and
+# 52-D0-9D-B2-96-00) so this is not a MAC clash, but two devices answering for one address on
+# one segment means whichever replies first wins the ESP's ARP cache. The board would then read
+# port counters from an arbitrary switch and be right about neither. That is the shape of a
+# fault that looks intermittent rather than broken.
+#
+# A stays .10 because that address is written into the ESP firmware and into keti-reconfig.
+#
+# Serial, because the address being changed is the one an Ethernet request would arrive on.
+# Adding .11 alongside .10 is refused ("Error in container or list", data-node 9030) -- the
+# device will not carry two addresses on this interface. So the old one goes first. A null value
+# is how CORECONF deletes, and doing it over serial is safe precisely because serial does not
+# depend on the address being deleted.
+- ? "/ietf-interfaces:interfaces/interface[name='L3V1']/ietf-ip:ipv4/address[ip='192.168.1.10']"
+  :
+- ? "/ietf-interfaces:interfaces/interface[name='L3V1']/ietf-ip:ipv4/address"
+  : ip: 192.168.1.11
+    prefix-length: 24

@@ -60,10 +60,27 @@ uint16_t scanPort = 0;
 NetworkUDP dhcpUdp;
 char discovered[96] = "";
 
-// The switch in the path, on the address keti-reconfig gave it. Asked, not assumed: the bench
-// has had both a LAN9662 and a LAN9692 on it and the catalog checksum says which is here now.
-// These four names are what coap_client.h expects to find; it is that project's file unchanged.
+// Two switches now, and the sensor's stream crosses both:
+//
+//   LiDAR --1G--> [A] port2 => port1 --1G--> [B] port2 => port1 --100M--> this board
+//
+// Both arrived configured as 192.168.1.10, which is not a MAC clash -- their L3V1 addresses
+// differ -- but two devices answering for one address on one segment means whichever replies
+// first wins the ARP cache, and the board would read counters from an arbitrary switch while
+// believing it knew which. B was moved to .11 over serial; tools/switch-b-ip.yaml.
+//
+// kSwitch is not const because coap_client.h reads it as the target and the console walks the
+// list. It is that project's file unchanged.
 IPAddress kSwitch(192, 168, 1, 10);
+
+struct SwitchInPath {
+  uint8_t lastOctet;
+  const char *label;
+};
+static const SwitchInPath kSwitches[] = {
+    {10, "A -- the sensor's switch"},
+    {11, "B -- this board's switch"},
+};
 NetworkUDP udp;
 uint16_t messageId = 1;
 const uint16_t kCoapPort = 5683;
@@ -554,6 +571,39 @@ bool configureSensor(const char *mode, const char *profile, bool remember) {
   return code >= 200 && code < 300;
 }
 
+// The whole interface subtree in one request, for whichever switch kSwitch points at. Keyed
+// instance queries are refused with 4.00 on this device's Ethernet endpoint (they work over
+// serial), so per-port detail is parsed out of the subtree -- which costs nothing extra, since
+// the gate parameters are already in there.
+void readPorts() {
+  static uint8_t payload[4096];
+  uint8_t code = 0;
+  int blocks = 0;
+  const int n = fetchSid(ketiSidFor("ietf-interfaces:interfaces"), payload, sizeof(payload),
+                         &code, &blocks);
+  Serial.printf("interfaces: %d bytes in %d block(s), code %d.%02d\n", n, blocks, code >> 5,
+                code & 0x1F);
+  if (n <= 0) return;
+  portTable.count = 0;
+  if (!parseInterfaces(payload, n, &portTable)) { Serial.println("  parse failed"); return; }
+  Serial.printf("  %-8s %-6s %-8s %14s %14s %8s %8s\n", "port", "link", "speed", "in-octets",
+                "out-octets", "in-disc", "out-disc");
+  for (int i = 0; i < portTable.count; i++) {
+    const PortState &p = portTable.ports[i];
+    char speed[10];
+    if (p.speedMbps) snprintf(speed, sizeof(speed), "%uM", p.speedMbps);
+    else snprintf(speed, sizeof(speed), "-");
+    Serial.printf("  %-8s %-6s %-8s %14llu %14llu %8llu %8llu\n", p.name,
+                  p.operStatus == 1 ? "up" : "down", speed, (unsigned long long)p.inOctets,
+                  (unsigned long long)p.outOctets, (unsigned long long)p.inDiscards,
+                  (unsigned long long)p.outDiscards);
+    if (p.tasSeen)
+      Serial.printf("           TAS gate-enabled=%llu cycle=%llu/%llu entries=%d\n",
+                    (unsigned long long)p.gateEnabled, (unsigned long long)p.cycleNumerator,
+                    (unsigned long long)p.cycleDenominator, p.gateCount);
+  }
+}
+
 // The serial console is the only way in until something is on the WiFi AP, and it is also the
 // right place for the one action that changes the sensor rather than observing it. Asking for
 // the stream is deliberately a keypress and not something that happens on its own: it puts the
@@ -599,54 +649,29 @@ void handleConsole() {
       break;
     }
     case 's': {
-      Serial.printf("asking the switch at %s for its catalog checksum...\n",
-                    kSwitch.toString().c_str());
-      static uint8_t payload[256];
-      uint8_t code = 0;
-      int blocks = 0;
-      const int n = fetchSid(KETI_SID_YANG_CHECKSUM, payload, sizeof(payload), &code, &blocks);
-      switchCatalog = n > 0 ? checksumFromPayload(payload, n) : String("");
-      if (switchCatalog.length()) {
-        Serial.printf("  %s -> %s\n", switchCatalog.c_str(), nameForCatalog(switchCatalog));
+      for (const SwitchInPath &sw : kSwitches) {
+        kSwitch = IPAddress(192, 168, 1, sw.lastOctet);
+        Serial.printf("%s (%s): ", kSwitch.toString().c_str(), sw.label);
+        static uint8_t payload[256];
+        uint8_t code = 0;
+        int blocks = 0;
+        const int n = fetchSid(KETI_SID_YANG_CHECKSUM, payload, sizeof(payload), &code, &blocks);
+        switchCatalog = n > 0 ? checksumFromPayload(payload, n) : String("");
+        if (!switchCatalog.length()) { Serial.println("no answer"); continue; }
+        Serial.printf("%s -> %s\n", switchCatalog.c_str(), nameForCatalog(switchCatalog));
         // A table built against another catalog addresses the wrong nodes and returns plausible
         // nonsense, which is worse than returning nothing.
         if (switchCatalog != KETI_SID_CATALOG_CHECKSUM)
           Serial.printf("  WARNING: this firmware's SID table is for %s\n",
                         KETI_SID_CATALOG_CHECKSUM);
-      } else {
-        Serial.println("  no answer");
       }
       break;
     }
     case 'S': {
-      // The whole interface subtree in one request. Keyed instance queries are refused with 4.00
-      // on this device's Ethernet endpoint (they work over serial), so per-port detail has to be
-      // parsed out of the subtree -- which costs nothing extra, since it is all in there.
-      static uint8_t payload[4096];
-      uint8_t code = 0;
-      int blocks = 0;
-      const int n = fetchSid(ketiSidFor("ietf-interfaces:interfaces"), payload, sizeof(payload),
-                             &code, &blocks);
-      Serial.printf("interfaces: %d bytes in %d block(s), code %d.%02d\n", n, blocks, code >> 5,
-                    code & 0x1F);
-      if (n <= 0) break;
-      portTable.count = 0;
-      if (!parseInterfaces(payload, n, &portTable)) { Serial.println("  parse failed"); break; }
-      Serial.printf("  %-8s %-6s %-8s %14s %14s %8s %8s\n", "port", "link", "speed", "in-octets",
-                    "out-octets", "in-disc", "out-disc");
-      for (int i = 0; i < portTable.count; i++) {
-        const PortState &p = portTable.ports[i];
-        char speed[10];
-        if (p.speedMbps) snprintf(speed, sizeof(speed), "%uM", p.speedMbps);
-        else snprintf(speed, sizeof(speed), "-");
-        Serial.printf("  %-8s %-6s %-8s %14llu %14llu %8llu %8llu\n", p.name,
-                      p.operStatus == 1 ? "up" : "down", speed,
-                      (unsigned long long)p.inOctets, (unsigned long long)p.outOctets,
-                      (unsigned long long)p.inDiscards, (unsigned long long)p.outDiscards);
-        if (p.tasSeen)
-          Serial.printf("           TAS gate-enabled=%llu cycle=%llu/%llu entries=%d\n",
-                        (unsigned long long)p.gateEnabled, (unsigned long long)p.cycleNumerator,
-                        (unsigned long long)p.cycleDenominator, p.gateCount);
+      for (const SwitchInPath &sw : kSwitches) {
+        kSwitch = IPAddress(192, 168, 1, sw.lastOctet);
+        Serial.printf("\n=== %s  %s ===\n", kSwitch.toString().c_str(), sw.label);
+        readPorts();
       }
       break;
     }

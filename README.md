@@ -1,6 +1,10 @@
 # esp32-lidar
 
-An ESP32-S3 with a W5500 watching an Ouster OS1-16 through a LAN9662, and serving what it sees.
+An ESP32-S3 with a W5500 watching an Ouster OS1-16 across two LAN9662s, and serving what it sees.
+
+```
+LiDAR --1G--> [A .10] p2 => p1 --1G--> [B .11] p2 => p1 --100M--> ESP32-S3 --WiFi--> the page
+```
 
 Sibling to [keti-reconfig](https://github.com/hwkim3330/keti-reconfig) — same boards, same bench,
 same W5500 pinout. That project drives the switch; this one measures what crosses it.
@@ -82,6 +86,40 @@ nothing on the network was touched. The stream came back four seconds later with
 configuring anything — the remembered request did it — and then ran three minutes at
 **320.5 packets/s with no loss and a 3134 µs mean gap**, identical to the day before. Worth
 keeping in mind next time the sensor is silent: ask it, and check the alert log before the wiring.
+
+## Three hops (2026-08-11)
+
+A second LAN9662 went into the path, and the board reads both of them:
+
+```
+=== 192.168.1.10  A -- the sensor's switch ===
+  port  link  speed        in-octets     out-octets  in-disc out-disc
+  1     up    1000M            80142     4261072430        0        0   -> B
+  2     up    1000M       4287978186          88481        0        0   <- LiDAR
+=== 192.168.1.11  B -- this board's switch ===
+  1     up    100M              3277      216461846        0        0   -> this board
+  2     up    1000M        216476860           5261        0        0   <- A
+```
+
+**Both boards arrived on 192.168.1.10.** Their L3V1 MACs differ, so it is not a MAC clash, but
+two devices answering for one address on one segment means whichever replies first wins the ARP
+cache — the board would read counters from an arbitrary switch while believing it knew which.
+That is a fault shaped like intermittence rather than like breakage. B moved to `.11` over
+serial (`tools/switch-b-ip.yaml`); adding a second address is refused outright, so the old one
+has to be deleted first, which CORECONF does with a null value.
+
+The extra hop costs nothing measurable:
+
+| | two hops | three hops |
+|---|---|---|
+| rate | 320/s | 319-321/s |
+| mean gap | 3134 us | 3134 us |
+| worst gap | 4.2-4.9 ms | 5.9 ms |
+| gaps over 6250 us | 0 | 0 in 55 s |
+| discards, every port | 0 | 0 |
+
+Which is the expected answer at 3% utilisation with nothing competing — and now it is measured
+rather than assumed. The interesting version of this question needs traffic worth queueing.
 
 ## The board talks to both ends
 
