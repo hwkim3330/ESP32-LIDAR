@@ -53,9 +53,9 @@ gets power-cycled, so `c` and `C` write the request to NVS, and if a stream was 
 nothing has arrived for twenty seconds the board asks again, at most every thirty. It re-applies
 only what was asked for; it never decides on its own that the sensor should be streaming.
 
-## The sensor is in a startup loop (2026-08-11, open)
+## The morning it would not start (2026-08-11, resolved by a power cycle)
 
-It ran on 2026-08-10 and does not now. What it says about itself:
+It ran on 2026-08-10 and would not the next morning. What it said about itself:
 
 ```
 /api/v1/system/network  -> carrier true, duplex full, speed 1000
@@ -72,10 +72,16 @@ Every entry in the log is that one alert, on a **12.6 second period** (16.2 s, 2
 time, so the whole sensor is restarting, not just reinitializing. Its HTTP server drops out
 mid-request as it goes.
 
-So this is not a network fault: the link is gigabit, the configuration is right, and the board
-accepts every request with `HTTP 204`. Ouster's first suspect for this alert is **power** — an
-OS1 draws 14–20 W and surges at motor spin-up, and a marginal supply produces exactly this. The
-cabling was disturbed between the working run and this one.
+So this was not a network fault: the link was gigabit, the configuration was right, and the board
+got `HTTP 204` for every request. Ouster's first suspect for this alert is **power** — an OS1
+draws 14–20 W and surges at motor spin-up, and a marginal supply produces exactly this. The
+cabling had been disturbed between the working run and this one.
+
+**A power cycle fixed it**, which is the same diagnosis arriving from the other direction:
+nothing on the network was touched. The stream came back four seconds later without anyone
+configuring anything — the remembered request did it — and then ran three minutes at
+**320.5 packets/s with no loss and a 3134 µs mean gap**, identical to the day before. Worth
+keeping in mind next time the sensor is silent: ask it, and check the alert log before the wiring.
 
 ## The board talks to both ends
 
@@ -157,8 +163,6 @@ and the bus is handed over afterwards.
 
 ## Not done yet
 
-- **The sensor's startup loop.** Nothing here can fix it; the board will restore the stream by
-  itself once the sensor stays up.
 - The page has not been opened in a browser — the firmware serves it, and it has been rendered
   against mock data, but no device has joined the AP to look at the real thing.
 - Three hops, and what TAS does to these numbers. The gap distribution above is the baseline to
