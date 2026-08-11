@@ -734,6 +734,62 @@ void handleConsole() {
       if (apRunning) WiFi.softAP(kApSsid, kApPassword); else WiFi.softAPdisconnect(true);
       Serial.printf("wifi ap %s\n", apRunning ? "on" : "off");
       break;
+    case 'L': {
+      // Move this board onto the sensor's link-local network for as long as it takes to talk to
+      // it. The sensor never got a DHCP lease -- it fell back to 169.254.195.68 and does not
+      // retry, not even across a link flap -- while its udp_dest still points at 192.168.1.20.
+      // So its packets arrive here and nothing this board sends can ever reach it: the reply has
+      // no route. Changing address fixes both halves at once, because the flood addressed to
+      // 192.168.1.20 stops being ours and lwIP drops it, which is what keeps this board
+      // responsive while the sensor is still transmitting at full rate.
+      esp_netif_ip_info_t info = {};
+      info.ip.addr = uint32_t(IPAddress(169, 254, 195, 1));
+      info.netmask.addr = uint32_t(IPAddress(255, 255, 0, 0));
+      info.gw.addr = 0;
+      esp_netif_set_ip_info(gEthNetif, &info);
+      Serial.println("this board is 169.254.195.1/16 -- deaf to the flood, able to reach the sensor");
+      break;
+    }
+    case 'M': {
+      esp_netif_ip_info_t info = {};
+      info.ip.addr = uint32_t(kStaticSelf);
+      info.netmask.addr = uint32_t(kStaticMask);
+      info.gw.addr = uint32_t(kStaticGateway);
+      esp_netif_set_ip_info(gEthNetif, &info);
+      Serial.printf("back to %s\n", kStaticSelf.toString().c_str());
+      break;
+    }
+    case 'n': {
+      // Give the sensor a fixed address of its own, so none of this depends on DHCP again.
+      // Ouster's API takes the override as a bare JSON string.
+      HTTPClient http;
+      http.setTimeout(8000);
+      const String url = "http://169.254.195.68/api/v1/system/network/ipv4/override";
+      Serial.printf("PUT %s <- \"192.168.1.50/24\"\n", url.c_str());
+      if (http.begin(url)) {
+        http.addHeader("Content-Type", "application/json");
+        const int code = http.PUT("\"192.168.1.50/24\"");
+        Serial.printf("  %d %s\n", code, http.getString().substring(0, 200).c_str());
+        http.end();
+      }
+      break;
+    }
+    case 'N': {
+      // And point it at this board again, at a rate this link carries.
+      HTTPClient http;
+      http.setTimeout(8000);
+      const String url = "http://169.254.195.68/api/v1/sensor/config";
+      String body = "{\"udp_dest\":\"192.168.1.20\",\"udp_port_lidar\":7502,\"udp_port_imu\":7503";
+      body += ",\"lidar_mode\":\"512x10\",\"udp_profile_lidar\":\"RNG15_RFL8_NIR8\"}";
+      Serial.printf("POST %s\n", url.c_str());
+      if (http.begin(url)) {
+        http.addHeader("Content-Type", "application/json");
+        const int code = http.POST(body);
+        Serial.printf("  %d %s\n", code, http.getString().substring(0, 200).c_str());
+        http.end();
+      }
+      break;
+    }
     case 'p': {
       // Find the W5500's interrupt line, if it is wired at all. Same method that found the SPI
       // pins on this board: do not trust a datasheet, watch every pin at once and let the one

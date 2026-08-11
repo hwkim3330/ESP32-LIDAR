@@ -152,6 +152,42 @@ which is out of band from the flood. That stopped it long enough for the board t
 the end the sensor was power-cycled — its configuration is not persistent, so a power cycle is
 also the way to be certain a stream has stopped.
 
+## The sensor gave itself an address nobody could answer (2026-08-11)
+
+The stream stopped and the board could not get it back. A tap between the sensor and switch A
+answered it in one capture:
+
+```
+169.254.195.68  ->  192.168.1.20 : 7502     639 datagrams/s, fragmenting into ~2000 frames
+169.254.195.68  ->  192.168.1.20 : 7503     IMU
+```
+
+The sensor had **fallen back to link-local**. Its DHCP request went unanswered — this board is
+the DHCP server, and it was drowning in the sensor's own full-rate stream at the time — so it
+assigned itself 169.254.195.68 and stopped asking. It does not retry, not even across a link
+flap. Meanwhile `udp_dest` still said 192.168.1.20, so its packets kept arriving here while
+nothing sent from here could ever reach it: a reply to 169.254.195.68 has no route from a
+192.168.1.20/24 interface. Not a dead sensor. Two addresses that cannot see each other.
+
+The way out was to **move this board onto the sensor's network for as long as it took to talk**
+(`L`, and `M` to come back). That fixes both halves at once, and the second half is the one that
+matters: with the board no longer holding 192.168.1.20, the flood addressed to it is dropped
+early instead of being reassembled, which is what made the board responsive enough to act at all.
+
+Then the real fix, so none of it can recur:
+
+```
+PUT /api/v1/system/network/ipv4/override   <- "192.168.1.50/24"     200
+POST /api/v1/sensor/config                 <- 512x10, low rate       204
+```
+
+**The sensor has a fixed address now.** DHCP is out of the path. `n` and `N` do those two.
+
+One correction to an earlier claim here: bounding the drain does **not** protect the board from a
+stream it cannot carry. Reception and reassembly happen in the driver and lwIP tasks, above
+`loop()` in priority, so the board goes silent no matter how politely its own read loop yields.
+The bound is still right — it is just not armour. Not being the destination is armour.
+
 ## The board talks to both ends
 
 The switch is asked, not assumed. One CoAP request does it, and it is the only one that can come
