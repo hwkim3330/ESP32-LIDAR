@@ -436,40 +436,35 @@ So: the board's counts and rates are trustworthy, and for microsecond jitter the
 reference. It matters for what can be measured of TAS — a 12 ms effect is plain in the board's
 numbers, a 200 µs one is only visible on the tap.
 
-### Writing schedules from the board: admin lands, adoption does not
+### Everything this bench reports about a schedule is unreliable except the traffic
 
-The board builds the schedule itself and its bytes are **byte-identical** to what keti-tsn-cli
-produces for the same YAML — checked in full, not assumed. The precise state after the board
-writes, read over serial:
+There is no working explanation for why a schedule written from the board stops the stream while
+the identical bytes from the CLI shape it. What there is instead is a list of the signals that
+looked like explanations and were not — and that list is the useful part, because every one of
+them was read the same wrong way.
 
-```
-admin-control-list:  2 entries, the cycle as asked      <- the write landed
-oper-control-list:   []                                 <- never adopted
-oper-gate-states:    254                                <- TC0 held closed
-config-change-error: 1
-config-change-time:  0                                  <- it never happened
-```
+| read as | actually |
+|---|---|
+| `out-discards` | a **counter since boot**. 56103 looked like the mechanism; the delta while a working schedule ran is **zero over 25 s** |
+| `config-change-error` | also **cumulative**. It reads **1 after a write that demonstrably worked** |
+| `oper-control-list` | **never populated on this device** — empty while a schedule is actively shaping |
+| `entries=2` from the board | the **admin** list, not the oper one |
 
-So the write is not the problem and never was: **the switch refuses to adopt it.** The identical
-bytes from the CLI over serial are adopted and shape cleanly.
+So the claim in earlier commits — that the board's write lands in admin and is not adopted — rests
+on a node that is empty even on success. **It is not supported.** The stream stopping after the
+board writes is real and reproducible; the reason is not known.
 
-Two things this cost, both worth more than the conclusion:
+Worse for tidiness, the CLI is not reliably reproducible either. The same file that produced
+96–101 outliers a second earlier in the day produced **0–1** an hour later, with the switch
+reporting `oper-cycle-time` of 10 ms in both cases. Whatever decides whether a schedule actually
+takes hold is not visible in any node read so far.
 
-- **`out-discards` was read as an event when it is a counter since boot.** 56103 looked like the
-  mechanism; measured as a delta while the CLI's schedule ran it is **zero over 25 seconds**, with
-  the rate steady at 319–321/s. Shaping drops nothing. Read deltas.
-- **`entries=2` from the board is the *admin* list, not the oper one**, which briefly looked like
-  evidence that adoption had worked. The two disagree exactly when it matters, which is the whole
-  reason `oper-gate-states` is the thing to check.
+**The one trustworthy instrument is the receiver.** Gaps over threshold at the board went from
+0–1 to 96–101 per second when shaping was really happening, and that measurement has never lied.
+Configuration read back from the switch has, four times.
 
-What is still not known is why adoption is refused for the board and not for the CLI. Both base
-times have been tried from the board — zero and a few seconds ahead of the switch's clock — and
-both left the oper list empty. The next thing to read is `config-change-error` immediately after
-the CLI's *successful* write, to see what a working adoption looks like from the same vantage
-point.
-
-Until then, schedules that close a gate go on over serial (`tools/tas-b-10ms.yaml`), which is
-also the only path that cannot be cut by what it is writing.
+Next time: apply, then decide from the traffic whether it took, and only then look at the
+switch's own account of itself.
 
 ### `admin-base-time: 0` is why a schedule will not go away
 
