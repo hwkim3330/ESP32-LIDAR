@@ -1,0 +1,55 @@
+# YANG paths this firmware needs from the LAN9662, resolved to SIDs at build time.
+#
+# Deliberately shorter than keti-reconfig's list. That project is a console and shows the whole
+# device; this one is a measurement rig and only needs to answer two questions about the switch:
+# what speed each port negotiated, and what the gate schedule on them is.
+#
+# Regenerate with:
+#   KETI_CATALOG=5151bae07677b1501f9cf52637f2a38f node tools/gen_sid_table/generate.mjs
+
+# The subtree that carries everything below. Read whole rather than per port: an instance query
+# with a key is refused over Ethernet CoAP on this device (it works over serial), so per-port
+# detail has to be parsed out of the subtree anyway.
+- "/ietf-interfaces:interfaces"
+- "/ietf-interfaces:interfaces/interface"
+- "/ietf-interfaces:interfaces/interface/name"
+- "/ietf-interfaces:interfaces/interface/oper-status"
+- "/ietf-interfaces:interfaces/interface/phys-address"
+- "/ietf-interfaces:interfaces/interface/statistics"
+
+# Container SIDs. The decoder walks the tree by concatenating parent path and child name, so a
+# container it cannot resolve stops it from reaching anything underneath.
+- "/ietf-interfaces:interfaces/interface/ieee802-ethernet-interface:ethernet"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port"
+
+# The question this rig actually has: the sensor claims a 1000M link. Reading it from the switch
+# is the independent confirmation, since the sensor and the switch are two separate witnesses.
+- "/ietf-interfaces:interfaces/interface/ieee802-ethernet-interface:ethernet/speed"
+
+# Loss has to be attributable. If packets go missing, these say whether the switch dropped them
+# or the W5500 did -- without them "320 became 318" has no owner.
+- "/ietf-interfaces:interfaces/interface/statistics/in-octets"
+- "/ietf-interfaces:interfaces/interface/statistics/out-octets"
+- "/ietf-interfaces:interfaces/interface/statistics/in-discards"
+- "/ietf-interfaces:interfaces/interface/statistics/out-discards"
+- "/ietf-interfaces:interfaces/interface/statistics/in-errors"
+- "/ietf-interfaces:interfaces/interface/statistics/out-errors"
+- "/ietf-interfaces:interfaces/interface/statistics/in-unicast-pkts"
+- "/ietf-interfaces:interfaces/interface/statistics/out-unicast-pkts"
+
+# TAS. Reading comes first and writing waits: a schedule on the port this board reaches the
+# switch through would cut the only path back, and the 9662's serial console is not currently
+# connected to anything that could undo it.
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/gate-enabled"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/oper-gate-states"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-cycle-time/numerator"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-cycle-time/denominator"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-control-list/gate-control-entry"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-control-list/gate-control-entry/index"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-control-list/gate-control-entry/time-interval-value"
+- "/ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-control-list/gate-control-entry/gate-states-value"
+
+# Device identity, so the page can name what it is measuring through.
+- "/ietf-system:system-state/platform"
+- "/ietf-system:system-state/platform/machine"

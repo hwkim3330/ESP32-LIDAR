@@ -25,7 +25,7 @@
 #include <WiFi.h>
 
 #include "page.h"
-#include "switch_probe.h"
+#include "switch_link.h"
 
 constexpr int kSck = 48, kMosi = 21, kCs = 45, kMiso = 47;
 
@@ -62,10 +62,13 @@ char discovered[96] = "";
 
 // The switch in the path, on the address keti-reconfig gave it. Asked, not assumed: the bench
 // has had both a LAN9662 and a LAN9692 on it and the catalog checksum says which is here now.
-const IPAddress kSwitchAddress(192, 168, 1, 10);
-NetworkUDP coapUdp;
-uint16_t coapMessageId = 1;
+// These four names are what coap_client.h expects to find; it is that project's file unchanged.
+IPAddress kSwitch(192, 168, 1, 10);
+NetworkUDP udp;
+uint16_t messageId = 1;
+const uint16_t kCoapPort = 5683;
 String switchCatalog = "";
+PortTable portTable;
 const IPAddress kSensorAddress(192, 168, 1, 50);
 uint8_t sensorMac[6] = {0};
 bool sensorLeased = false;
@@ -308,6 +311,15 @@ void handleReset() {
 
 // ------------------------------------------------------------------------------------ setup
 
+// The CORECONF decoder walks a nested CBOR tree by recursion, and the interface subtree is deep
+// enough -- interfaces, interface, bridge-port, gate-parameter-table, control list, entry -- to
+// blow the 8 KB Arduino gives loopTask by default. It does not fail gracefully when it does: the
+// stack canary fires and the board reboots mid-parse.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
+// Placed here rather than at the top of the file: the macro expands to a definition, and the
+// Arduino build inserts its generated prototypes after the last thing that looks like one --
+// putting it above the sketch's own types makes every function referring to them fail to parse.
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -350,7 +362,7 @@ void setup() {
   lidarUdp.begin(kLidarPort);
   imuUdp.begin(kImuPort);
   dhcpUdp.begin(67);
-  coapUdp.begin(5684);  // any local port; the switch answers to wherever it came from
+  udp.begin(5684);  // any local port; the switch answers to wherever it came from
 
   server.on("/", []() { server.send_P(200, "text/html", kPage); });
   server.on("/api/stats", handleStats);
@@ -560,16 +572,58 @@ void handleConsole() {
     }
     case 's': {
       Serial.printf("asking the switch at %s for its catalog checksum...\n",
-                    kSwitchAddress.toString().c_str());
-      switchCatalog = fetchCatalogChecksum(coapUdp, kSwitchAddress, coapMessageId);
-      if (switchCatalog.length())
+                    kSwitch.toString().c_str());
+      static uint8_t payload[256];
+      uint8_t code = 0;
+      int blocks = 0;
+      const int n = fetchSid(KETI_SID_YANG_CHECKSUM, payload, sizeof(payload), &code, &blocks);
+      switchCatalog = n > 0 ? checksumFromPayload(payload, n) : String("");
+      if (switchCatalog.length()) {
         Serial.printf("  %s -> %s\n", switchCatalog.c_str(), nameForCatalog(switchCatalog));
-      else
+        // A table built against another catalog addresses the wrong nodes and returns plausible
+        // nonsense, which is worse than returning nothing.
+        if (switchCatalog != KETI_SID_CATALOG_CHECKSUM)
+          Serial.printf("  WARNING: this firmware's SID table is for %s\n",
+                        KETI_SID_CATALOG_CHECKSUM);
+      } else {
         Serial.println("  no answer");
+      }
+      break;
+    }
+    case 'S': {
+      // The whole interface subtree in one request. Keyed instance queries are refused with 4.00
+      // on this device's Ethernet endpoint (they work over serial), so per-port detail has to be
+      // parsed out of the subtree -- which costs nothing extra, since it is all in there.
+      static uint8_t payload[4096];
+      uint8_t code = 0;
+      int blocks = 0;
+      const int n = fetchSid(ketiSidFor("ietf-interfaces:interfaces"), payload, sizeof(payload),
+                             &code, &blocks);
+      Serial.printf("interfaces: %d bytes in %d block(s), code %d.%02d\n", n, blocks, code >> 5,
+                    code & 0x1F);
+      if (n <= 0) break;
+      portTable.count = 0;
+      if (!parseInterfaces(payload, n, &portTable)) { Serial.println("  parse failed"); break; }
+      Serial.printf("  %-8s %-6s %-8s %14s %14s %8s %8s\n", "port", "link", "speed", "in-octets",
+                    "out-octets", "in-disc", "out-disc");
+      for (int i = 0; i < portTable.count; i++) {
+        const PortState &p = portTable.ports[i];
+        char speed[10];
+        if (p.speedMbps) snprintf(speed, sizeof(speed), "%uM", p.speedMbps);
+        else snprintf(speed, sizeof(speed), "-");
+        Serial.printf("  %-8s %-6s %-8s %14llu %14llu %8llu %8llu\n", p.name,
+                      p.operStatus == 1 ? "up" : "down", speed,
+                      (unsigned long long)p.inOctets, (unsigned long long)p.outOctets,
+                      (unsigned long long)p.inDiscards, (unsigned long long)p.outDiscards);
+        if (p.tasSeen)
+          Serial.printf("           TAS gate-enabled=%llu cycle=%llu/%llu entries=%d\n",
+                        (unsigned long long)p.gateEnabled, (unsigned long long)p.cycleNumerator,
+                        (unsigned long long)p.cycleDenominator, p.gateCount);
+      }
       break;
     }
     case '?':
-      Serial.println("i=info  g<path>=GET  s=switch catalog  c=512x10  C=1024x10  r=reset");
+      Serial.println("i=info  g<path>=GET  s=catalog  S=switch ports  c=512x10  C=1024x10  r=reset");
       break;
     default:
       break;

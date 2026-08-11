@@ -96,7 +96,29 @@ s  ->  5151bae07677b1501f9cf52637f2a38f  ->  LAN9662 (54 YANG / 54 SID)
 
 Everything past that — port counters, gate schedules — needs a SID table generated for *that*
 catalog, so nothing else honestly comes first. keti-reconfig's table is for the LAN9692 and does
-not apply here.
+not apply here; `tools/gen_sid_table` builds one for the 9662 from the catalog already cached in
+keti-tsn-cli, without touching the device.
+
+With that table, `S` reads the whole interface subtree in one request (1429 bytes over six
+Block2 blocks) and the switch confirms, as a second witness, what the sensor claimed:
+
+```
+port     link   speed         in-octets     out-octets  in-disc out-disc
+1        up     100M              33654      475373573        0        0   <- the ESP
+2        up     1000M         479652843          31540        0        0   <- the LiDAR
+L3V1     up     -                 20456           2210        0        0
+TAS on both ports: gate-enabled 0, cycle 0/1, no entries
+```
+
+**The speed conversion is right there**: 1000M on the sensor's port, 100M on the board's, and
+`in-discards` and `out-discards` zero on both. Nothing is being dropped by the switch, which is
+what makes the ESP's steady 320/s meaningful — the losslessness is now attributable rather than
+assumed. And no gate schedule is configured anywhere, so every number measured so far is the
+unshaped baseline.
+
+Per-port detail is parsed out of the subtree because this device answers a **keyed instance
+query with 4.00 over Ethernet CoAP** (the same request works over serial). It costs nothing:
+the gate parameters ride inside the subtree already.
 
 ## The UI rides WiFi
 
@@ -120,6 +142,7 @@ rather than something the board does on its own.
 | `i` | ask the sensor what it is |
 | `g<path>` | GET any path on the sensor, printed whole — `g/api/v1/sensor/alerts` |
 | `s` | ask the switch for its catalog checksum |
+| `S` | read every switch port: link, speed, counters, gate schedule |
 | `c` | 512x10, low data rate, `udp_dest` → this board |
 | `C` | 1024x10, full profile — 34 Mbit/s, expect loss |
 | `r` | clear counters |
@@ -167,6 +190,7 @@ and the bus is handed over afterwards.
   against mock data, but no device has joined the AP to look at the real thing.
 - Three hops, and what TAS does to these numbers. The gap distribution above is the baseline to
   compare against.
-- The 1000M figure now comes from the sensor's own `system/network`, not from the switch. Reading
-  it from the LAN9662 side would be independent confirmation; keti-reconfig already reads port
-  speed over CoAP.
+- **Writing a gate schedule.** Reading is done; writing is not, and deliberately. A schedule on
+  port 1 is a schedule on the only path this board has back to the switch, and the 9662's serial
+  console — the one thing that could undo a bad one — is not currently connected to anything.
+  Connect it before the first write.

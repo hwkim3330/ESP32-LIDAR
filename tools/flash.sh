@@ -11,7 +11,7 @@ set -eu
 
 PORT=${1:-}
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-FQBN='esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc'
+FQBN='esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc,PartitionScheme=huge_app'
 
 if [ -z "$PORT" ]; then
   echo "ports that look like an ESP32-S3:"
