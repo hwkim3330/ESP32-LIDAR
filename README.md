@@ -436,7 +436,44 @@ So: the board's counts and rates are trustworthy, and for microsecond jitter the
 reference. It matters for what can be measured of TAS — a 12 ms effect is plain in the board's
 numbers, a 200 µs one is only visible on the tap.
 
-### Everything this bench reports about a schedule is unreliable except the traffic
+### Decide from the traffic — `tools/shape.py`
+
+The switch's account of itself was misread four times in one day, always the same way: as a
+statement about the change just made, when it was nothing of the kind.
+
+| read as | actually |
+|---|---|
+| `out-discards` | a **counter since boot**; its delta under a working schedule is **zero** |
+| `config-change-error` | also **cumulative** — reads 1 after a write that demonstrably worked |
+| `oper-control-list` | **never populated on this device**, empty while a schedule is actively shaping |
+| `entries=N` from the board | the **admin** list, not the operational one |
+
+The receiver never lied. So `tools/shape.py` applies a schedule and then decides from the traffic:
+
+```
+switch clock 11256
+  gates open             320-320/s   gaps over threshold 0-1/s (mean 0)
+attempt 1: write accepted, base 11280
+  with the schedule      318-321/s   gaps over threshold 0-100/s (mean 82)
+
+  SHAPING: gaps over threshold 0/s -> 82/s, rate unchanged at 318-321/s
+```
+
+It reads the switch's clock, sets the base a few seconds ahead, writes, watches, and says whether
+anything happened — retrying with a fresh base, and restoring an all-open schedule if the stream
+stops or nothing changes.
+
+**Building it explained the inconsistency it was built to survive.** The same file had shaped at
+96–101 outliers a second in the morning and done nothing an hour later; the difference was the
+base time written into the YAML, which was a constant while the switch's clock kept moving. It
+was never device flakiness. Computed fresh each time, shaping takes on the first attempt.
+
+It also caught a bug in itself worth keeping: matching `seconds:` in the switch's output finds
+**`nanoseconds:`** first, which put the base three hundred million seconds into the future, where
+a schedule waits forever while every write reports success. The harness reported honestly that
+nothing had happened, twice, instead of trusting the return code — which is the whole point of it.
+
+### The nodes themselves
 
 There is no working explanation for why a schedule written from the board stops the stream while
 the identical bytes from the CLI shape it. What there is instead is a list of the signals that
