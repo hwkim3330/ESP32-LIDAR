@@ -501,6 +501,35 @@ The firmware keeps the presets and refuses to send them, with the reason next to
 Re-enabling it means the atomic container write and two more SIDs (`admin-base-time` and its
 leaves, `admin-gate-states`) — worth doing, since the point of this board is to need no PC.
 
+## Contention has nowhere to come from (2026-08-11)
+
+The interesting TAS question is not "can a gate delay packets" — that is measured above — but
+"does gating protect one stream from another". That needs two streams competing for the same
+egress port, and on this bench there is no way to arrange it.
+
+**The board cannot supply the competition.** Gates are on egress, so the competing traffic has to
+be *addressed to the board*, and a switch never sends a frame back out the port it arrived on —
+broadcast included. Nothing the board transmits can ever compete with what it receives.
+
+**And there is nowhere to plug a generator in.** A LAN9662 has two data ports. Both are taken on
+both switches: the sensor and the link to B on A, that link and this board on B. Two-port switches
+can only make a chain, and a chain has one source.
+
+**Raising the sensor does not help either.** 1024x10 is 6.6 Mbit/s on a 100 Mbit/s port. Filling
+that port takes about 95, which only the PC can produce.
+
+So it needs one of:
+
+- **an unmanaged switch where the tap is now**, so the sensor and the PC share A port 2 — cheap,
+  but it costs the tap, which is the only reference for what the sensor actually emits;
+- **the LAN9692**, which has twelve ports and is the RECON target anyway.
+
+`tools/load.sh` is ready for either: it puts the PC's adapter on a VLAN with a chosen PCP and
+sends UDP at the board on a port the board will not mistake for sensor data. Sending the load on
+a different priority from the sensor's is the whole point — gate that priority, and the sensor
+should come through untouched while the load is shaped. That is what TAS is for, and it cannot be
+shown at all while the only traffic on the wire is the traffic you care about.
+
 ## Not done yet
 
 - The page has not been opened in a browser — the firmware serves it, and it has been rendered

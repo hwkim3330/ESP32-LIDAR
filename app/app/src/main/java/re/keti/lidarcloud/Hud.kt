@@ -92,11 +92,13 @@ class Hud(context: Context) : View(context) {
         val panelWidth = dp(300f)
         var y = pad
 
-        y = panel(canvas, pad, y, panelWidth, dp(64f)) { top ->
-            text.color = ink; text.textSize = dp(15f); text.isFakeBoldText = true
-            canvas.drawText("KETI LiDAR", pad + dp(14f), top + dp(24f), text)
+        // No title. The room is on the screen; a label saying which room it is adds nothing that
+        // the picture does not already say, and the panel is worth more as one line of state.
+        y = panel(canvas, pad, y, panelWidth, dp(40f)) { top ->
+            fill.color = if (rate > 0) good else muted
+            canvas.drawCircle(pad + dp(20f), top + dp(20f), dp(4f), fill)
             text.color = ink2; text.textSize = dp(12f); text.isFakeBoldText = false
-            canvas.drawText(status, pad + dp(14f), top + dp(46f), text)
+            canvas.drawText(status, pad + dp(34f), top + dp(24f), text)
         }
 
         y = panel(canvas, pad, y, panelWidth, dp(86f)) { top ->
