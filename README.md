@@ -436,26 +436,36 @@ So: the board's counts and rates are trustworthy, and for microsecond jitter the
 reference. It matters for what can be measured of TAS — a 12 ms effect is plain in the board's
 numbers, a 200 µs one is only visible on the tap.
 
-### Writing schedules from the board: accepted, and empty
+### Writing schedules from the board: the list was never the problem
 
-The board can now build the schedule itself, and its bytes are **byte-identical** to what
-keti-tsn-cli produces for the same YAML (checked, not assumed). Sent over Ethernet CoAP the write
-is accepted — `2.04 Changed` — and the port ends up with:
+The board builds the schedule itself and its bytes are **byte-identical** to what keti-tsn-cli
+produces for the same YAML — checked, not assumed. An earlier version of this section said the
+write landed with an empty operational control list and called it an unexplained difference
+between the transports. **That was a misreading**, and the correction is worth more than the
+claim was.
+
+Asked at the right moment — by the board itself, seconds after writing, rather than by a serial
+fetch that took long enough for the safety net to undo it — the switch says:
 
 ```
-oper-control-list:
-    gate-control-entry: []     <- empty
-oper-gate-states: 254          <- one state, held forever
+B port 1:  gate-enabled=1  cycle=10000000/1000000000  entries=2      out-discards 56103
 ```
 
-An empty operational list means the port holds a single gate state permanently, which is how the
-stream stopped both times it was tried. The same bytes over MUP1 serial from the PC produce the
-schedule correctly. This device is already known to treat its two transports differently — keyed
-instance queries are refused over Ethernet and work over serial — and this looks like more of the
-same, but it is **not yet explained**.
+**The list is there.** Two entries, the cycle as asked. The empty list seen before was the *oper*
+list read at a moment when the schedule had not started or had already been withdrawn. What is
+actually happening is in the last column: **the switch is discarding on that port**, tens of
+thousands of frames, which is why the stream stops rather than merely bunching.
 
-Until it is, schedules go on over serial (`tools/tas-b-10ms.yaml`), which is also the only path
-that cannot be cut by what it is writing.
+So the open question is no longer "why does the write not take" but "why does this schedule cause
+drops from the board when the identical one from the CLI shapes cleanly at 320/s". `out-discards`
+is the counter that says so and it was not being watched — the first thing to read next time.
+
+A two-window schedule with **both windows open**, written from the board, is carried without any
+of this: `entries=2`, traffic undisturbed. That separates writing a list from closing a gate, and
+writing a list is fine.
+
+Until the rest is understood, schedules that actually close a gate go on over serial
+(`tools/tas-b-10ms.yaml`), which is also the only path that cannot be cut by what it is writing.
 
 ### `admin-base-time: 0` is why a schedule will not go away
 

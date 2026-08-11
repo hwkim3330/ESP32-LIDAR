@@ -43,6 +43,13 @@ struct TasPreset {
 // exactly what the first attempt at this measured, at 1 ms with 200 us closed.
 static const TasPreset kTasPresets[] = {
     {"open", "no shaping", 1000000, 1, {{1000000, 0xFF}}},
+    // Two windows, both wide open. Nothing is shaped and nothing can be cut off, so this asks
+    // one question and only one: does a list of two entries written from here arrive as a list
+    // of two entries? The earlier failure could not separate that from whether the schedule was
+    // adopted, because by the time anything could be read the port had stopped carrying the
+    // answer.
+    {"twoopen", "two windows, both open -- a probe, not a schedule", 10000000, 2,
+     {{5000000, 0xFF}, {5000000, 0xFF}}},
     {"10ms", "10 ms cycle, TC0 closed 5 ms", 10000000, 2,
      {{5000000, 0xFF}, {5000000, 0xFE}}},
     {"20ms", "20 ms cycle, TC0 closed 12 ms", 20000000, 2,
