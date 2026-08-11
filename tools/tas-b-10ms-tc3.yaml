@@ -1,0 +1,41 @@
+# Gate the port the board actually receives through: switch B, port 1.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/tas-b-10ms.yaml \
+#       --transport serial -d /dev/ttyACM2
+#
+# TAS gates are on egress, so shaping what arrives at the board means gating the port it hangs
+# off — which on this bench is B port 1, the last hop.
+#
+# 10 ms cycle: 5 ms with every class open, then 5 ms with TC3 closed. The sensor's stream is TC0
+# and its packets are 3125 µs apart, so a 5 ms closed window holds one or two of them and lets
+# them out together. That is the whole point of the numbers: the first attempt at this used a
+# 1 ms cycle with 200 µs closed, which is finer than the spacing it was trying to shape, so
+# nothing queued and nothing changed. Shaping is only visible when the window is coarser than
+# the arrivals.
+#
+# 254 closes TC3 alone, not everything. A window that closes every class also closes the path
+# this board talks to the switch through, and 5 ms of that every 10 ms is a control channel that
+# works badly rather than one that fails clearly.
+#
+# Restore with tools/tas-open.yaml (pointed at ttyACM2).
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table"
+  : gate-enabled: true
+    admin-gate-states: 255
+    admin-cycle-time:
+      numerator: 10000000
+      denominator: 1000000000
+    admin-base-time:
+      seconds: 0
+      nanoseconds: 0
+    admin-control-list:
+      gate-control-entry:
+        - index: 0
+          operation-name: set-gate-states
+          gate-states-value: 255
+          time-interval-value: 5000000
+        - index: 1
+          operation-name: set-gate-states
+          gate-states-value: 247
+          time-interval-value: 5000000
+    config-change: true

@@ -46,6 +46,26 @@ closure is eight packets that have to be held somewhere, so **this port's queue 
 somewhere between four and eight frames**. That is a property of the switch, obtained without
 reading anything from the switch.
 
+## The control: gating a class the sensor does not use
+
+Same port, same 10 ms cycle, same half-closed duty — only the class changes. `254` closes TC0,
+which the sensor's stream uses; `247` closes TC3, which only the board's generated load uses.
+
+| closed class | lidar rate | worst gap | gaps > 6250 µs /s |
+|---|---|---|---|
+| TC0 (`254`) | 320/s | 12057 µs | **99** |
+| TC3 (`247`) | 319–321/s | 6862 µs | **0–1** |
+| none | 320/s | 6850 µs | 0–1 |
+
+**The gate is class-selective, and this is the measurement that says so.** A schedule that closes
+a class the traffic does not use is indistinguishable from no schedule at all — which is exactly
+the property the whole idea depends on, and the one worth checking before building a demonstration
+on top of it.
+
+It also settles what a single board can and cannot show. The load leaves the board and the sensor
+arrives at it, so the two never share an egress port and the load being shaped cannot be observed
+from here. Two receivers, or a generator that is not the receiver, is what that needs.
+
 ## How to use it
 
 For shaping that is visible but harmless, **10 ms with half the cycle closed**: the mean is
