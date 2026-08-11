@@ -1,0 +1,17 @@
+# Turn gating off on port 1, over the serial console.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/gating-off.yaml \
+#       --transport serial -d /dev/ttyACM1
+#
+# This is the escape hatch, and it exists because the port a schedule has to go on -- the one
+# the sensor's stream leaves the switch through -- is also the only path the ESP has back to the
+# switch. If a schedule ever closes that path, the board cannot withdraw its own mistake and
+# this file is the way out. Serial reaches the switch whatever the gates are doing.
+#
+# config-change is what makes the switch adopt the change; without it gate-enabled: false is
+# merely stored.
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/gate-enabled"
+  : false
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/config-change"
+  : true

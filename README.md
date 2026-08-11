@@ -184,13 +184,54 @@ starves IDLE0 and reboots the board on the task watchdog about fifteen seconds i
 build of this firmware did exactly that. Raw access is confined to the boot-time pinout check,
 and the bus is handed over afterwards.
 
+## TAS: measured, and it showed nothing (2026-08-11)
+
+A 1 ms cycle with 800 us all-open and 200 us of TC0 closed, written to port 1, against the
+sensor's stream:
+
+| | mean gap | rate | worst gap |
+|---|---|---|---|
+| gates open | 3134 us | 318-321/s | 14.1 ms |
+| TC0 closed 200 us in 1 ms | 3134 us | 319-321/s | 12.0 ms |
+| open again | 3134 us | 320-323/s | 12.1 ms |
+
+Not a failure of TAS — this rig cannot see it. Packets arrive 3125 us apart on a link running at
+3% utilisation, so when the gate shuts there is nothing queued to delay. And the baseline itself
+has an **11-14 ms gap once a second**, which is sixty times the window being measured: the board
+stalls during its own once-a-second housekeeping and misses packets. The instrument has to be
+fixed before shaping is worth measuring at all, and that stall is the first real bug this project
+has in its own code rather than in something it talks to.
+
+## Writing a schedule from the board is disabled, and why
+
+The first attempt wrote the schedule as five patches — control list, numerator, denominator,
+gate-enabled, config-change. The list was rejected and the rest were accepted, so the switch
+gated against no valid schedule and shut port 1: the stream stopped, and so did the only path
+this board had to withdraw its own mistake. `gate-enabled: false` over serial did not bring it
+back; an all-open schedule did, and the ESP still needed a reboot afterwards because the W5500
+stack stayed wedged.
+
+Three things came out of it:
+
+- **Write the whole container in one iPATCH.** `keti-tsn-cli` does, so it either lands or it does
+  not. Five patches have a half-applied state and that state is a trap.
+- **Turning gating off is an all-open schedule, not `gate-enabled: false`.** Only the first
+  reliably restored traffic. `tools/tas-open.yaml`.
+- **Out-of-band beats clever.** The serial console cannot be cut by anything written over
+  Ethernet. `tools/tas-tc0-200us.yaml` and `tools/tas-open.yaml` run from the PC.
+
+The firmware keeps the presets and refuses to send them, with the reason next to the code.
+Re-enabling it means the atomic container write and two more SIDs (`admin-base-time` and its
+leaves, `admin-gate-states`) — worth doing, since the point of this board is to need no PC.
+
 ## Not done yet
 
 - The page has not been opened in a browser — the firmware serves it, and it has been rendered
   against mock data, but no device has joined the AP to look at the real thing.
 - Three hops, and what TAS does to these numbers. The gap distribution above is the baseline to
   compare against.
-- **Writing a gate schedule.** Reading is done; writing is not, and deliberately. A schedule on
-  port 1 is a schedule on the only path this board has back to the switch, and the 9662's serial
-  console — the one thing that could undo a bad one — is not currently connected to anything.
-  Connect it before the first write.
+- **The once-a-second stall.** 11-14 ms of missed packets, in this board's own loop. Everything
+  timing-related is limited by it, so it comes before any more measurement.
+- **Schedule writes from the board**, as one atomic container patch. The point of this rig is to
+  need no PC, and sensor configuration already needs none; the switch side is what is left.
+- **A second LAN9662**, for three hops.

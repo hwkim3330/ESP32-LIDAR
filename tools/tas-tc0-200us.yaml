@@ -1,0 +1,38 @@
+# Gate port 1 -- the port the sensor's stream leaves the switch through.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/tas-tc0-200us.yaml \
+#       --transport serial -d /dev/ttyACM1
+#
+# 1 ms cycle: 800 us with every class open, then 200 us with TC0 closed. The sensor's stream is
+# TC0, so this is the window that bunches it -- and 200 us of a 1 ms cycle delays traffic rather
+# than starving it, which is what keeps the control path alive.
+#
+# Written from the PC over serial, not from the ESP over Ethernet, and the reason is scar
+# tissue: this whole container goes in ONE iPATCH, so it either lands or it does not. Sending it
+# as five separate patches -- list, cycle, gate-enabled, config-change -- let the list be
+# rejected while gate-enabled and config-change were accepted, which left the switch gating
+# against no valid schedule and shut the path that would have withdrawn it. Serial is also out
+# of band, so no schedule can ever cut the way back.
+#
+# Restore with tools/tas-open.yaml.
+- ? "/ietf-interfaces:interfaces/interface[name='1']/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table"
+  : gate-enabled: true
+    admin-gate-states: 255
+    admin-cycle-time:
+      numerator: 1000000
+      denominator: 1000000000
+    admin-base-time:
+      seconds: 0
+      nanoseconds: 0
+    admin-control-list:
+      gate-control-entry:
+        - index: 0
+          operation-name: set-gate-states
+          gate-states-value: 255
+          time-interval-value: 800000
+        - index: 1
+          operation-name: set-gate-states
+          gate-states-value: 254
+          time-interval-value: 200000
+    config-change: true

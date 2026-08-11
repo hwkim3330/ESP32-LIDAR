@@ -622,8 +622,35 @@ void handleConsole() {
       }
       break;
     }
+    case 'T': {
+      // The port the sensor's stream comes out of, which is also this board's way back to the
+      // switch. Deliberately not a default and not automatic.
+      const String id = Serial.readStringUntil('\n');
+      const String want = id.length() ? id : String("half");
+      const SchedulePreset *preset = presetFor(want.c_str());
+      if (!preset) {
+        Serial.printf("unknown preset '%s'; have:", want.c_str());
+        for (const SchedulePreset &p : kPresets) Serial.printf(" %s", p.id);
+        Serial.println();
+        break;
+      }
+      uint8_t code = 0;
+      if (!writeSchedule("1", *preset, &code)) {
+        Serial.println("refused: writing a schedule from here is disabled -- see switch_link.h.");
+        Serial.println("use tools/tas-tc0-200us.yaml over serial from the PC instead.");
+      }
+      break;
+    }
+    case 't': {
+      uint8_t code = 0;
+      const bool ok = clearSchedule("1", &code);
+      Serial.printf("gating off on port 1: %s, code %d.%02d\n", ok ? "accepted" : "rejected",
+                    code >> 5, code & 0x1F);
+      break;
+    }
     case '?':
-      Serial.println("i=info  g<path>=GET  s=catalog  S=switch ports  c=512x10  C=1024x10  r=reset");
+      Serial.println("i=info  g<path>=GET  s=catalog  S=ports  T<preset>=gate on  t=gate off  "
+                     "c=512x10  C=1024x10  r=reset");
       break;
     default:
       break;
@@ -658,10 +685,13 @@ void loop() {
       configureSensor(requestedMode.c_str(), requestedProfile.c_str(), false);
     }
 
-    Serial.printf("link %s %uM %s | lidar %lu pkt (%u B, %lu us mean) | imu %lu\n",
+    // Mean alone hides what a shaper does: gating changes the spread, not the average, because
+    // the sensor keeps sending at the same rate. So the second's worst gap goes out beside it.
+    const HistoryBucket &last = history[(historyHead - 1 + kHistory) % kHistory];
+    Serial.printf("link %s %uM %s | lidar %lu pkt %u/s (%u B, gap %lu us mean / %lu us max) | imu %lu\n",
                   ETH.linkUp() ? "UP" : "DOWN", ETH.linkSpeed(),
-                  ETH.fullDuplex() ? "full" : "half", (unsigned long)lidar.packets, lidar.lastSize,
-                  (unsigned long)history[(historyHead - 1 + kHistory) % kHistory].meanInterval,
-                  (unsigned long)imu.packets);
+                  ETH.fullDuplex() ? "full" : "half", (unsigned long)lidar.packets, last.packets,
+                  lidar.lastSize, (unsigned long)last.meanInterval,
+                  (unsigned long)last.maxInterval, (unsigned long)imu.packets);
   }
 }
