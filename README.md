@@ -121,6 +121,37 @@ The extra hop costs nothing measurable:
 Which is the expected answer at 3% utilisation with nothing competing — and now it is measured
 rather than assumed. The interesting version of this question needs traffic worth queueing.
 
+## The stream this board cannot survive (2026-08-11)
+
+Loading the path to make queueing visible was the obvious next experiment, and it went badly in
+a way worth keeping. `1024x10` with the full profile is 640 datagrams a second of 3392 bytes,
+which fragment into roughly 2000 frames. What happened:
+
+- **The switches delivered all of it.** B forwarded 3 GB with `out-discards: 0`, and the sensor's
+  port counted 2044 packets a second going in. Nothing in the network dropped anything.
+- **The board reassembled none of it.** `lidar 0 pkt 0/s` while the wire was saturated: fragments
+  arrive faster than they can be pulled off the W5500, so no datagram ever completes.
+- **It could not take the request back.** Every path to the sensor crosses the same flood, so the
+  message that would slow it down could not get out. Priming the console with the command and
+  raising the port at the same instant did not win the race either.
+
+Two things had to be true for that to be unrecoverable, and both are now fixed:
+
+**The drain loop was unbounded.** `while (parsePacket() > 0)` exits when the socket runs dry — so
+when the sender outruns the reader it never exits, and nothing else in `loop()` runs: no
+housekeeping, no console, no way to ask for help. It now reads at most eight packets per call and
+says `OVERRUN` when it hits that, because hitting it means the arrival times being recorded have
+already stopped meaning what they say.
+
+**`C` is refused.** A board that can ask for a stream it cannot survive, and cannot then withdraw
+the request, is the bug. Re-enable it alongside something that makes it recoverable — a rate the
+link carries, or a control path that does not share it.
+
+Getting out took the switch: `tools/port2-down.yaml` shuts the sensor's ingress over serial,
+which is out of band from the flood. That stopped it long enough for the board to breathe, and in
+the end the sensor was power-cycled — its configuration is not persistent, so a power cycle is
+also the way to be certain a stream has stopped.
+
 ## The board talks to both ends
 
 The switch is asked, not assumed. One CoAP request does it, and it is the only one that can come

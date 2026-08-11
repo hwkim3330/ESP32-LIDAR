@@ -1,0 +1,16 @@
+# Re-enable the LiDAR ingress on switch A.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/port2-up.yaml \
+#       --transport serial -d /dev/ttyACM1
+#
+# The way out of a stream the board cannot survive. At 1024x10 with the full profile the sensor
+# sends 640 datagrams a second of 3392 bytes, which fragment into roughly 1900 frames a second --
+# more than this board can pull off the W5500, so the receive loop never runs dry and never
+# yields. The console stops answering, and the sensor's configuration cannot be changed because
+# every request to it crosses the same flood.
+#
+# Turning the port off at the switch is out of band from all of that. Re-enable with
+# port2-up.yaml once the board is running firmware whose drain is bounded.
+- ? "/ietf-interfaces:interfaces/interface[name='2']/enabled"
+  : true

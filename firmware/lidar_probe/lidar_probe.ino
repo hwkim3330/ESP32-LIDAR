@@ -433,10 +433,21 @@ void setup() {
 // times recorded for them are when this code got round to them rather than when they landed.
 int maxBurst = 0, lastBurst = 0;
 
+// Bounded, and it has to be. Unbounded, this loop exits only when the socket runs dry -- so the
+// moment the sensor sends faster than the board can read, it never exits at all. Nothing else in
+// loop() runs: no housekeeping, no serial console, no way to tell the sensor to slow down, and
+// every request to the sensor crosses the same flood. 1024x10 with the full profile does exactly
+// that (640 datagrams a second of 3392 bytes, ~1900 fragments), and recovering from it needed the
+// switch to shut the port over serial.
+//
+// Eight is well above what a healthy second needs and low enough that a bad one still yields.
+constexpr int kMaxPerDrain = 8;
+uint32_t drainOverruns = 0;
+
 void drain(NetworkUDP &udp, Flow &s, bool timed) {
   int size;
   int burst = 0;
-  while ((size = udp.parsePacket()) > 0) {
+  while (burst < kMaxPerDrain && (size = udp.parsePacket()) > 0) {
     if (timed && ++burst > maxBurst) maxBurst = burst;
     const IPAddress from = udp.remoteIP();
     const uint16_t fromPort = udp.remotePort();
@@ -448,6 +459,9 @@ void drain(NetworkUDP &udp, Flow &s, bool timed) {
     recordArrival(s, size, from, fromPort, timed);
   }
   if (timed && burst) lastBurst = burst;
+  // Hitting the bound means packets were still waiting -- the board is behind, and the arrival
+  // times it is recording have already stopped meaning what they say.
+  if (timed && burst >= kMaxPerDrain) drainOverruns++;
 }
 
 // BOOTP/DHCP is fixed-layout up to the options, so what is needed here takes no real parser:
@@ -620,8 +634,19 @@ void handleConsole() {
       configureSensor("512x10", "RNG15_RFL8_NIR8");
       break;
     case 'C':
-      Serial.println("configuring: 1024x10, full profile (34 Mbit/s -- expect loss on W5500)");
-      configureSensor("1024x10", "RNG19_RFL8_SIG16_NIR16");
+      // Refused, and this one is not caution -- it is a measured result. 1024x10 with the full
+      // profile is 640 datagrams a second of 3392 bytes, which fragment into about 2000 frames.
+      // The switch delivers every one of them (3 GB forwarded, zero discards), and the board
+      // reassembles none: parsePacket never completes a datagram, so the count reads zero while
+      // the wire is saturated. Worse, the request that would undo it has to cross the same
+      // flood, so the board cannot withdraw its own instruction. Recovering meant shutting the
+      // sensor's port at the switch over serial, and in the end power-cycling the sensor.
+      //
+      // A board that can ask for a stream it cannot survive, and cannot then take it back, is
+      // the bug. Re-enable this only alongside something that makes it recoverable -- a rate
+      // the link can carry, or a control path that does not share it.
+      Serial.println("refused: 1024x10 full profile floods this board past recovery.");
+      Serial.println("see the note in the source; 'c' (512x10 low rate) is what this link carries.");
       break;
     case 'r':
       lidar = Flow(); imu = Flow(); scan = Flow();
@@ -740,8 +765,8 @@ void handleConsole() {
       break;
     }
     case '?':
-      Serial.println("i=info  g<path>=GET  s=catalog  S=ports  T<preset>=gate on  t=gate off  "
-                     "c=512x10  C=1024x10  r=reset");
+      Serial.println("i=info  g<path>=GET  s=catalog  S=ports  p=probe INT  w=wifi  "
+                     "c=512x10  r=reset");
       break;
     default:
       break;
@@ -816,10 +841,11 @@ void loop() {
                   (unsigned long)last.maxInterval, (unsigned long)imu.packets);
     // Printed a cycle late on purpose: the cost of the housekeeping cannot be measured by the
     // housekeeping that reports it, so this is the previous second's figure.
-    Serial.printf("   gaps over %u us: %lu | min gap %lu us | burst %d | serve %ld us | house %ld us\n",
+    Serial.printf("   gaps over %u us: %lu | min gap %lu us | burst %d%s | serve %ld us | house %ld us\n",
                   kOutlierThresholdUs, (unsigned long)lastOutliers,
-                  (unsigned long)lastMinInterval, maxBurst, (long)worstServe,
-                  (long)housekeepingUs);
+                  (unsigned long)lastMinInterval, maxBurst,
+                  drainOverruns ? " OVERRUN" : "", (long)worstServe, (long)housekeepingUs);
+    drainOverruns = 0;
     worstDrain = worstServe = worstPass = 0;
     housekeepingUs = esp_timer_get_time() - houseStart;
     maxBurst = 0;
