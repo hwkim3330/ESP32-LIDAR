@@ -399,6 +399,49 @@ The earlier attempt saw nothing because its cycle was 1 ms with 200 µs closed, 
 3125 µs spacing it was trying to shape: nothing ever queued. **Shaping is only visible when the
 window is coarser than the arrivals.**
 
+### The tap says how much of the jitter is the network and how much is this board
+
+Both measured on the same stream at the same time — the tap sits between the sensor and switch A,
+the board sits two switches later:
+
+| | tap, at the sensor | board, after two hops and a W5500 |
+|---|---|---|
+| rate | 320.0/s | 319-321/s |
+| mean gap | **3125 µs** (the nominal figure exactly) | 3134 µs |
+| standard deviation | **83 µs** | — |
+| p99 | **3433 µs** | ~5000 µs |
+| worst | **4053 µs** | 6913 µs |
+| gaps over 6250 µs | **0 in 25 s** | 0-3 per second |
+
+Nothing is lost anywhere: 320.0/s at both ends across two switches. But **the sensor is far more
+regular than this board can measure** — the spread roughly doubles by the time it is timestamped
+here, and that extra is the 1 ms poll, the SPI read and the scheduler, not the network.
+
+So: the board's counts and rates are trustworthy, and for microsecond jitter the tap is the
+reference. It matters for what can be measured of TAS — a 12 ms effect is plain in the board's
+numbers, a 200 µs one is only visible on the tap.
+
+### Writing schedules from the board: accepted, and empty
+
+The board can now build the schedule itself, and its bytes are **byte-identical** to what
+keti-tsn-cli produces for the same YAML (checked, not assumed). Sent over Ethernet CoAP the write
+is accepted — `2.04 Changed` — and the port ends up with:
+
+```
+oper-control-list:
+    gate-control-entry: []     <- empty
+oper-gate-states: 254          <- one state, held forever
+```
+
+An empty operational list means the port holds a single gate state permanently, which is how the
+stream stopped both times it was tried. The same bytes over MUP1 serial from the PC produce the
+schedule correctly. This device is already known to treat its two transports differently — keyed
+instance queries are refused over Ethernet and work over serial — and this looks like more of the
+same, but it is **not yet explained**.
+
+Until it is, schedules go on over serial (`tools/tas-b-10ms.yaml`), which is also the only path
+that cannot be cut by what it is writing.
+
 ### `admin-base-time: 0` is why a schedule will not go away
 
 Restoring all-open afterwards appeared to work — the write returned success and the admin list

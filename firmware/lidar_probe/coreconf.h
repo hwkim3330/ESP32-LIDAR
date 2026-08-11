@@ -31,6 +31,10 @@ struct PortState {
   bool tasSeen;
   uint64_t gateEnabled, gateStates, cycleNumerator, cycleDenominator;
 
+  // The switch's own clock, read from the same subtree. Writing a schedule needs it: a base time
+  // in the past is written successfully and then refused, leaving the port on its old schedule.
+  uint64_t currentSeconds;
+
   // One cycle of the gate control list. Eight windows is more than the demo schedules use and
   // keeps the whole port table in static memory.
   static constexpr int kMaxGates = 8;
@@ -187,6 +191,9 @@ inline void coreconfValue(CborCursor &c, uint32_t sid, PortTable *table, int por
          &PortState::inUnicast},
         {"ietf-interfaces:interfaces/interface/statistics/out-unicast-pkts",
          &PortState::outUnicast},
+        {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/"
+         "ieee802-dot1q-sched-bridge:gate-parameter-table/current-time/seconds",
+         &PortState::currentSeconds},
     };
     for (const auto &leaf : kLeaves) {
       if (sid == ketiSidFor(leaf.path)) {

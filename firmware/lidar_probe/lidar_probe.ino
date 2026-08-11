@@ -27,6 +27,7 @@
 #include "cloud_ble.h"
 #include "page.h"
 #include "switch_link.h"
+#include "tas_write.h"
 
 constexpr int kSck = 48, kMosi = 21, kCs = 45, kMiso = 47;
 
@@ -747,6 +748,84 @@ bool fetchBeamGeometry() {
   return true;
 }
 
+// Applying a schedule, safely enough that a tablet may ask for it.
+//
+// The clock comes first and is not optional: the base time has to be ahead of the switch's own
+// current-time or the write is accepted and the change refused, which leaves the port on the
+// schedule you were trying to replace -- indistinguishable, from outside, from the write having
+// worked. Reading the interfaces subtree gets it, and the same read tells us the port exists.
+int tasActive = 0;             // index into kTasPresets; 0 is "open"
+int64_t tasAppliedAt = 0;
+String tasResult = "";
+
+// The switch's clock, remembered with the moment it was read. Recovery cannot depend on reading
+// it again: the read has to come back through the port a bad schedule may have closed, and it
+// was exactly that read -- not the write -- that stranded the first attempt. Requests in the
+// other direction are not gated, so a patch sent without waiting for an answer still lands.
+uint64_t switchClockSeconds = 0;
+int64_t switchClockAt = 0;
+
+uint64_t switchClockNow() {
+  if (switchClockSeconds == 0) return 0;
+  return switchClockSeconds + (esp_timer_get_time() - switchClockAt) / 1000000;
+}
+
+bool applyTas(int index, const char *port) {
+  const TasPreset *preset = tasPresetAt(index);
+  if (!preset) return false;
+  for (int i = 0; i < preset->windowCount; i++) {
+    if (preset->windows[i].states == 0) { tasResult = "refused: a window closes every class"; return false; }
+  }
+
+  kSwitch = IPAddress(192, 168, 1, 11);   // switch B: the last hop, where egress gating lands
+  static uint8_t payload[4096];
+  uint8_t code = 0;
+  int blocks = 0;
+  const int n = fetchSid(ketiSidFor("ietf-interfaces:interfaces"), payload, sizeof(payload),
+                         &code, &blocks);
+  if (n <= 0) { tasResult = "no answer from the switch"; return false; }
+  portTable.count = 0;
+  if (!parseInterfaces(payload, n, &portTable)) { tasResult = "could not read the switch"; return false; }
+  uint64_t now = 0;
+  for (int i = 0; i < portTable.count; i++)
+    if (portTable.ports[i].currentSeconds > now) now = portTable.ports[i].currentSeconds;
+  if (now == 0) { tasResult = "the switch did not report its clock"; return false; }
+  switchClockSeconds = now;
+  switchClockAt = esp_timer_get_time();
+
+  // Base time zero for a schedule, the clock plus a few seconds for the way back. Both are
+  // empirical rather than understood, and both were measured twice on this device: a schedule
+  // written with a future base was adopted with an EMPTY operational control list, which leaves
+  // the port holding one gate state forever; the identical bytes with base zero shaped the
+  // stream correctly. Going the other way, base zero is refused outright while a schedule is
+  // running (config-change-error 1) and a future base is accepted.
+  static uint8_t request[512];
+  const size_t length = buildScheduleCbor(request, port, *preset,
+                                          index == 0 ? now + 3 : 0);
+  uint8_t patchCode = 0;
+  const bool ok = patchRaw(request, length, &patchCode);
+  tasResult = String(preset->id) + ": " + (ok ? "accepted" : "rejected") + " " +
+              String(patchCode >> 5) + "." + String(patchCode & 0x1F);
+  Serial.printf("TAS %s on port %s, base %llu+3 -> %s\n", preset->id, port,
+                (unsigned long long)now, tasResult.c_str());
+  if (ok) { tasActive = index; tasAppliedAt = esp_timer_get_time(); }
+  return ok;
+}
+
+// Open the port again without asking the switch anything first. Uses the remembered clock, and
+// does not care whether an answer comes back -- the request travels in the direction that gating
+// does not touch, so it lands even when nothing can return.
+void revertTas(const char *port) {
+  static uint8_t request[512];
+  const uint64_t base = switchClockNow();
+  if (base == 0) { Serial.println("TAS: no remembered clock, cannot revert"); return; }
+  const size_t length = buildScheduleCbor(request, port, kTasPresets[0], base + 3);
+  uint8_t code = 0;
+  patchRaw(request, length, &code);
+  Serial.printf("TAS revert sent with base %llu (code %d.%02d, and an answer is not required)\n",
+                (unsigned long long)base, code >> 5, code & 0x1F);
+}
+
 // The serial console is the only way in until something is on the WiFi AP, and it is also the
 // right place for the one action that changes the sensor rather than observing it. Asking for
 // the stream is deliberately a keypress and not something that happens on its own: it puts the
@@ -923,6 +1002,14 @@ void handleConsole() {
       fetchBeamGeometry();
       break;
     }
+    case 'A': {
+      const String which = Serial.readStringUntil('\n');
+      int index = 0;
+      for (int i = 0; i < kTasPresetCount; i++)
+        if (which.startsWith(kTasPresets[i].id)) index = i;
+      applyTas(index, "1");
+      break;
+    }
     case 'm': {
       // Raise the resolution, staying on the low data rate profile. That profile is the whole
       // reason this is safe: its payload is 1280 bytes, which fits a frame, so more columns mean
@@ -1045,6 +1132,16 @@ void loop() {
     if (lidar.packets != packetsAtLastCheck) { packetsAtLastCheck = lidar.packets; quietSince = now; }
     // Once, as soon as there is a stream to place: the app is useless without it and nobody
     // should have to remember a keypress for something the board can tell it is time to do.
+    // If a schedule ever takes the stream away, put it back. Nothing on the tablet can leave the
+    // bench in a state that needs a serial cable: a shaped port that stops delivering for eight
+    // seconds is not shaping, it is a mistake, and the board undoes its own mistakes.
+    if (tasActive != 0 && lidar.packets == packetsAtLastCheck &&
+        now - tasAppliedAt > 8000000) {
+      Serial.println("TAS: no packets for eight seconds -- reverting to open");
+      revertTas("1");
+      tasActive = 0;
+    }
+
     static bool geometryPublished = false;
     if (!geometryPublished && lidar.packets > 100) geometryPublished = fetchBeamGeometry();
 

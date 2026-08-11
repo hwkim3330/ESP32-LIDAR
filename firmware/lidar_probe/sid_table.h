@@ -41,6 +41,14 @@ static const KetiSidEntry kKetiSidTable[] = {
     {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/oper-gate-states", 23139u},
     {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-cycle-time/numerator", 23114u},
     {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-cycle-time/denominator", 23113u},
+    {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/current-time", 23122u},
+    {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/current-time/seconds", 23124u},
+    {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-base-time", 23102u},
+    {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-base-time/seconds", 23104u},
+    {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-base-time/nanoseconds", 23103u},
+    {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-gate-states", 23115u},
+    {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/config-change-error", 23117u},
+    {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-control-list", 23105u},
     {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-control-list/gate-control-entry", 23106u},
     {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-control-list/gate-control-entry/index", 23108u},
     {"ietf-interfaces:interfaces/interface/ieee802-dot1q-bridge:bridge-port/ieee802-dot1q-sched-bridge:gate-parameter-table/admin-control-list/gate-control-entry/time-interval-value", 23110u},
@@ -49,7 +57,7 @@ static const KetiSidEntry kKetiSidTable[] = {
     {"ietf-system:system-state/platform/machine", 19025u},
 };
 
-static constexpr int kKetiSidCount = 28;
+static constexpr int kKetiSidCount = 36;
 
 inline uint32_t ketiSidFor(const char *path) {
   for (int i = 0; i < kKetiSidCount; ++i) {
