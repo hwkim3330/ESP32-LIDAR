@@ -53,10 +53,49 @@ yet established — all three were tried, none succeeded.
 
 Both tables read empty afterwards; the bench was left as it was found.
 
-## What to try next
+## Found: the CLI cannot express this entry
 
-Ask the CLI to encode the payload without sending it (`keti-tsn encode`) and compare the CBOR
-against a `get` of a device that already has an entry — the same technique that decoded the gate
-schedule's container, which was written by hand from the encoder's own bytes and worked first
-time. Failing that, MUP1 through the vendor's own `mvdct`, which presumably has a working shape
-for these lists.
+Encoding the payload without sending it settles it. A creation that works — an interface — comes
+out as integer SIDs throughout:
+
+```
+a1 1907f1 a2 09 "L3V1" 181c 3162        {2033: {+9 name, +28 type}}
+```
+
+The stream identity, written with the choice nested as the YANG path suggests, comes out with a
+**text string where a SID must be**:
+
+```
+a1 195dc5 a4 05 00 01 01 06 … 6a "parameters" …
+                              ^^^^^^^^^^^^^^^^
+```
+
+`parameters` is a **choice**, and choices are transparent in CORECONF — they get no SID, and their
+case's leaves are addressed as direct children of the parent. The encoder could not resolve it and
+fell back to the name, which is exactly the `Invalid SID` the device complained about.
+
+Flattening it removes the string. It also picks the wrong leaves:
+
+```
+a1 195dc5 a6 05 00 01 01 06 a1 01 81 "2" 195dd0 <mac> 195dd2 03 195dd3 01
+                                     ^24016      ^24018   ^24019
+```
+
+24016, 24018 and 24019 are `dmac-vlan-stream-identification/down/{destination-mac,tagged,vlan}`.
+The ones wanted are **24042, 24046, 24047** — the same three leaf names under
+`null-stream-identification`. `destination-mac`, `tagged` and `vlan` appear in both cases of the
+choice, the encoder takes the first match, and **`dmac-vlan-stream-identification` is exactly one
+of the nodes this build marks `not-supported`**.
+
+There is no way out of this from the YAML: null-stream-identification has no leaf that the other
+cases do not also have, so nothing can disambiguate it by name.
+
+## What to do about it
+
+Write the CBOR by SID rather than by name — `{24005: {+5: 0, +1: 1, +6: {...}, +37: mac, +41:
+tagged, +42: vlan}}`. The board already builds a gate schedule this way, from bytes checked
+against this same encoder, and that one was byte-identical on the first try. `f<sid>` reads any
+node already; a matching write is the missing half.
+
+The alternative is the vendor's own `mvdct`, which presumably has a shape for these lists that
+its own CLI lacks.
