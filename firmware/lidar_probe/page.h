@@ -44,7 +44,10 @@ h1{font-size:17px;font-weight:600;margin:0 0 2px}
 .tile .u{font-size:12px;color:var(--ink2);margin-left:3px}
 .chart h2{font-size:13px;font-weight:600;margin:0 0 1px}
 .chart .cap{color:var(--muted);font-size:12px;margin:0 0 10px}
-canvas{width:100%;height:180px;display:block;touch-action:none}
+/* pan-y, not none: the charts want horizontal pointer moves for the crosshair, but
+   touch-action:none also swallows vertical drags, and on a tablet that means the page
+   cannot be scrolled by dragging on a chart -- which is most of the page. */
+canvas{width:100%;height:180px;display:block;touch-action:pan-y}
 .tip{position:fixed;pointer-events:none;opacity:0;transition:opacity .08s;
   background:var(--surface);border:1px solid var(--border);border-radius:7px;
   padding:6px 9px;font-size:12px;font-variant-numeric:tabular-nums;

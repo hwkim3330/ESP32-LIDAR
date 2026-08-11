@@ -24,6 +24,7 @@
 #include <WiFi.h>
 
 #include "eth_w5500.h"
+#include "cloud_ble.h"
 #include "page.h"
 #include "switch_link.h"
 
@@ -423,6 +424,9 @@ void setup() {
   bucketStart = esp_timer_get_time();
   quietSince = bucketStart;
 
+  cloudBleBegin("KETI-LIDAR-CLOUD");
+  Serial.println("BLE up as \"KETI-LIDAR-CLOUD\"");
+
   xTaskCreatePinnedToCore(serverTask, "http", 8192, nullptr, 1, nullptr, 0);
   Serial.printf("FreeRTOS tick %u Hz -- one tick is %u ms, which is why HTTP is the task\n",
                 configTICK_RATE_HZ, 1000 / configTICK_RATE_HZ);
@@ -444,6 +448,64 @@ int maxBurst = 0, lastBurst = 0;
 constexpr int kMaxPerDrain = 8;
 uint32_t drainOverruns = 0;
 
+bool dumpNextPacket = false;
+
+// Frames are assembled by measurement id rather than by counting packets: a lost packet then
+// leaves a hole in one frame instead of shifting every column after it by sixteen.
+int lastMeasurementId = -1;
+
+void assembleColumns(const uint8_t *p, int length);
+
+// One column of the sensor: 16 beams, each a range in millimetres.
+constexpr int kBeams = 16;
+constexpr int kColumnsPerPacket = 16;
+constexpr int kPacketHeaderBytes = 32;
+constexpr int kColumnHeaderBytes = 12;
+
+// Every packet contributes its sixteen columns to the frame under construction. When the
+// measurement id wraps, the revolution is complete and the sender is allowed to take it.
+void assembleColumns(const uint8_t *p, int length) {
+  if (length < kPacketHeaderBytes + kColumnsPerPacket * (kColumnHeaderBytes + kBeams * 4)) return;
+  for (int c = 0; c < kColumnsPerPacket; c++) {
+    const uint8_t *col = p + kPacketHeaderBytes + c * (kColumnHeaderBytes + kBeams * 4);
+    const uint16_t measurementId = col[8] | (col[9] << 8);
+    const uint16_t status = col[10] | (col[11] << 8);
+    if (measurementId >= kCloudColumns) continue;
+    if (lastMeasurementId >= 0 && measurementId < lastMeasurementId) {
+      frameReady = true;  // wrapped: a full revolution is in the buffer
+    }
+    lastMeasurementId = measurementId;
+    for (int b = 0; b < kBeams; b++) {
+      const uint8_t *px = col + kColumnHeaderBytes + b * 4;
+      const uint32_t word = uint32_t(px[0]) | (uint32_t(px[1]) << 8) | (uint32_t(px[2]) << 16) |
+                            (uint32_t(px[3]) << 24);
+      // Invalid returns are zero, and zero is also how the app is told "nothing there".
+      frameRanges[measurementId][b] = status ? uint16_t(((word & 0x7FFF) * 8) / 10) : 0;
+    }
+  }
+}
+
+void decodePacket(const uint8_t *p, int length) {
+  if (length < kPacketHeaderBytes + kColumnsPerPacket * (kColumnHeaderBytes + kBeams * 4)) {
+    Serial.printf("packet is %d bytes, not the 1280 this decoder knows\n", length);
+    return;
+  }
+  for (int c = 0; c < 2; c++) {  // two columns is enough to see whether it is sane
+    const uint8_t *col = p + kPacketHeaderBytes + c * (kColumnHeaderBytes + kBeams * 4);
+    const uint16_t measurementId = col[8] | (col[9] << 8);
+    const uint16_t status = col[10] | (col[11] << 8);
+    Serial.printf("  column %u (status %u):", measurementId, status);
+    for (int b = 0; b < kBeams; b++) {
+      const uint8_t *px = col + kColumnHeaderBytes + b * 4;
+      const uint32_t word = uint32_t(px[0]) | (uint32_t(px[1]) << 8) | (uint32_t(px[2]) << 16) |
+                            (uint32_t(px[3]) << 24);
+      const uint32_t rangeMm = (word & 0x7FFF) * 8;
+      Serial.printf(" %5.2f", rangeMm / 1000.0);
+    }
+    Serial.println(" m");
+  }
+}
+
 void drain(NetworkUDP &udp, Flow &s, bool timed) {
   int size;
   int burst = 0;
@@ -455,6 +517,11 @@ void drain(NetworkUDP &udp, Flow &s, bool timed) {
     if (!s.sawFirst && read > 0) {
       memcpy(s.firstBytes, packet, min(read, 32));
       s.sawFirst = true;
+    }
+    if (timed && read >= 1280) assembleColumns(packet, read);
+    if (timed && dumpNextPacket && read >= 1280) {
+      dumpNextPacket = false;
+      decodePacket(packet, read);
     }
     recordArrival(s, size, from, fromPort, timed);
   }
@@ -790,6 +857,38 @@ void handleConsole() {
       }
       break;
     }
+    case 'G': {
+      // The app cannot place a single point without these. Fetched from the sensor rather than
+      // assumed, because beam angles are per-unit calibration, not a model constant.
+      HTTPClient http;
+      http.setTimeout(6000);
+      if (http.begin("http://" + kSensorAddress.toString() +
+                     "/api/v1/sensor/metadata/beam_intrinsics")) {
+        const int code = http.GET();
+        const String body = http.getString();
+        Serial.printf("beam_intrinsics %d (%u bytes)\n", code, body.length());
+        if (code == 200) {
+          geometryCharacteristic->setValue(body.c_str());
+          Serial.println("published to the BLE geometry characteristic");
+          for (unsigned i = 0; i < body.length(); i += 512) Serial.println(body.substring(i, i + 512));
+        }
+        http.end();
+      }
+      break;
+    }
+    case 'd': {
+      // Decode one packet and print what it says about the room. The layout is inferred from the
+      // size rather than from a document, and it lands exactly: 32 byte packet header, then 16
+      // columns of (12 byte column header + 16 pixels x 4 bytes), then a 32 byte footer, which
+      // is 1280 -- the payload this sensor actually sends in RNG15_RFL8_NIR8. Each pixel is one
+      // little-endian uint32: range in bits 0..14 counted in 8 mm units, reflectivity in 16..23,
+      // near-infrared in 24..31.
+      //
+      // Ranges in metres are the check. A room reads as a few metres; nonsense reads as nonsense.
+      dumpNextPacket = true;
+      Serial.println("waiting for a packet to decode...");
+      break;
+    }
     case 'p': {
       // Find the W5500's interrupt line, if it is wired at all. Same method that found the SPI
       // pins on this board: do not trust a datasheet, watch every pin at once and let the one
@@ -851,6 +950,9 @@ void handleConsole() {
 void serverTask(void *) {
   for (;;) {
     const int64_t start = esp_timer_get_time();
+    // Frames go out from here rather than from loop(): sending one is 35 notifications with a
+    // deliberate pause between them, and loop() is the thread that must not pause.
+    cloudSendFrame();
     server.handleClient();
     const int64_t spent = esp_timer_get_time() - start;
     if (spent > worstServe) worstServe = spent;

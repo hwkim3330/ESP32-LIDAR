@@ -1,3 +1,7 @@
 build/
 *.bin
 *.elf
+app/.gradle/
+app/build/
+app/app/build/
+app/local.properties

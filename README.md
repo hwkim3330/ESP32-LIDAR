@@ -1,6 +1,7 @@
 # esp32-lidar
 
-An ESP32-S3 with a W5500 watching an Ouster OS1-16 across two LAN9662s, and serving what it sees.
+An ESP32-S3 with a W5500 watching an Ouster OS1-16 across two LAN9662s, and putting the room on a
+tablet over BLE.
 
 ```
 LiDAR --1G--> [A .10] p2 => p1 --1G--> [B .11] p2 => p1 --100M--> ESP32-S3 --WiFi--> the page
@@ -86,6 +87,40 @@ nothing on the network was touched. The stream came back four seconds later with
 configuring anything — the remembered request did it — and then ran three minutes at
 **320.5 packets/s with no loss and a 3134 µs mean gap**, identical to the day before. Worth
 keeping in mind next time the sensor is silent: ask it, and check the alert log before the wiring.
+
+## The room, on the tablet, over BLE (2026-08-11)
+
+A page of timing statistics is not what a LiDAR is for. `app/` is an Android app that shows the
+point cloud, and the link to it is BLE — so the tablet keeps whatever WiFi it is on. The office
+network is where it belongs and this board has no credentials for it; BLE asks nothing of either.
+
+**The packet layout was inferred from its size, and it lands exactly.** 32 byte packet header,
+then 16 columns of (12 byte column header + 16 pixels x 4 bytes), then a 32 byte footer = 1280,
+which is the payload this sensor sends in `RNG15_RFL8_NIR8`. Each pixel is a little-endian
+uint32: range in bits 0..14 in 8 mm units, reflectivity 16..23, near-infrared 24..31. The proof
+is that the numbers are a room:
+
+```
+column 256 (status 1):  5.50  6.38  7.68  0.00  7.56  3.38  3.38  3.41 ... 2.85  0.00 m
+```
+
+**The bandwidth decides the design.** 512 columns x 16 beams at 10 Hz is 8192 points, 164 kB/s as
+raw ranges; BLE on this part does perhaps 20-40. So: one frame a second, every other column kept,
+range as a uint16 in centimetres — 8 kB a frame, which arrives whole. Notifications are
+unacknowledged and that is deliberate: a frame with a hole in it is still a picture of the room,
+a stream stalled waiting for a retransmit is not.
+
+**Geometry comes from the sensor, not from a datasheet.** Beam altitude angles (+14.18° to
+−17.21° on this unit) and azimuth offsets are per-unit calibration; the board fetches
+`beam_intrinsics` once and offers it as a readable characteristic, and the app places points with
+it. Ranges are converted on the tablet rather than on the board — three floats where one short
+would do is six times the bytes over the link that is actually scarce.
+
+Measured on the tablet: `frame 109 · 4096/4096 points`. Full frames, no loss.
+
+```
+LiDAR --1G--> [A .10] --1G--> [B .11] --100M--> ESP32-S3 --BLE--> tablet (still on office WiFi)
+```
 
 ## Three hops (2026-08-11)
 
