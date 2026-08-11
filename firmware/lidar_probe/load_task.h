@@ -31,7 +31,7 @@ extern esp_eth_handle_t gEthHandle;
 // came from -- which is exactly where the competing traffic has to go.
 static const uint8_t kLoadDestination[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 constexpr uint16_t kLoadEtherType = 0x88B5;   // IEEE local experimental 1
-constexpr int kLoadFrameBytes = 1200;
+constexpr int kLoadFrameBytes = 1500;
 
 volatile bool loadRunning = false;
 volatile uint8_t loadPcp = 3;

@@ -607,11 +607,28 @@ Measured: **400 frames/s of 1200 bytes, 3.84 Mbit/s, steady**, and throughout it
 stream stays at 319–321/s with no extra outliers. Generating costs the measurement nothing, which
 is the only reason it is allowed to share the board.
 
-Asking for more does not get more — 800, 2000, 5000 and 10000 frames a second all produce about
-420. `esp_eth_transmit` takes roughly 2.4 ms for a 1200 byte frame and the SPI bus is what runs
-out; with 3.3 Mbit/s arriving at the same time that is about 7.4 Mbit/s through the chip, which
-looks like its practical ceiling. The console reports what went out rather than what was asked
-for, because at the top of the range the two differ by a factor of twenty.
+Asking for more does not get more, so the question became how much the chip can be made to give.
+
+| SPI clock | frame | achieved | per frame |
+|---|---|---|---|
+| 20 MHz | 1200 B | 3.84 Mbit/s | 2400 µs |
+| 40 MHz | 1200 B | 5.95 Mbit/s | 1613 µs |
+| **40 MHz** | **1500 B** | **8.34 Mbit/s** | **1438 µs** |
+| 80 MHz | — | link dead, VERSIONR wrong | — |
+
+Two and a bit times the starting figure, and the last row is where this board's wiring gives up —
+the part is rated to 80 MHz but these traces are not.
+
+**The remaining wall is not the clock.** At 40 MHz a 1500 byte frame is 300 µs of SPI, and each
+one costs 1438 — so 1138 µs per frame is the driver waiting for the transmit to complete. Raising
+the clock cannot touch that, which is why doubling it bought 55% rather than 100%.
+
+**So a W5500 will not give 100 Mbit/s and nothing will make it.** The link negotiates 100BASE-TX;
+the host interface is SPI, and the chip cannot be fed fast enough to fill the wire it is attached
+to. The reason there is a W5500 here at all is that **the ESP32-S3 has no Ethernet MAC** — the
+original ESP32 and the P4 do, with RMII to a PHY, and those reach real 100 Mbit/s. On this part
+the ceiling is about 8 Mbit/s out, 11.6 through the chip with the sensor arriving at the same
+time, and the console reports what went out rather than what was asked for.
 
 Four megabits will not congest a 100 Mbit/s port, and it does not need to. **Congestion and
 discrimination are different demonstrations**: the first needs a full port and the PC, the second

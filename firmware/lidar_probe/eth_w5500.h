@@ -25,6 +25,9 @@
 #include <esp_netif.h>
 #include <driver/spi_master.h>
 
+// Raise carefully and check VERSIONR still reads 0x04 afterwards.
+constexpr int kEthSpiMhz = 40;
+
 static esp_eth_handle_t gEthHandle = nullptr;
 static esp_netif_t *gEthNetif = nullptr;
 
@@ -58,7 +61,16 @@ inline bool ethStart(int sck, int miso, int mosi, int cs, int pollPeriodMs, cons
 
   spi_device_interface_config_t devcfg = {};
   devcfg.mode = 0;
-  devcfg.clock_speed_hz = 20 * 1000 * 1000;
+  // The link is 100BASE-TX; the pipe is this. Every byte in or out of a W5500 crosses SPI, so
+  // the clock here -- not the PHY -- is what decides throughput. Arduino's ETH used 20 MHz and
+  // the board managed about 7.4 Mbit/s in and out together, which is what 20 MHz looks like once
+  // each frame has paid for its address phase, its length read and its pointer update.
+  //
+  // The part is rated to 80. Higher is not free: SPI at 40 MHz and above is a signal integrity
+  // question about this particular board's traces, and the way it fails is corrupt registers
+  // rather than a clean error. VERSIONR is checked at boot for exactly this reason -- if it
+  // stops reading 0x04, the clock is too high for the wiring.
+  devcfg.clock_speed_hz = kEthSpiMhz * 1000 * 1000;
   devcfg.input_delay_ns = 20;
   devcfg.spics_io_num = cs;
   devcfg.queue_size = 20;
