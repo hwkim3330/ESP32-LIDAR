@@ -46,6 +46,37 @@ it alone:
    `OS-1-16-A0`, firmware `v2.4.0`, serial `122018000001`.
 4. **It points the sensor at itself** — `udp_dest`, mode and profile in one POST.
 
+## The sensor's config does not persist, so the board remembers it
+
+Power-cycle an OS1 and `udp_dest` is gone — the HTTP config is applied, not saved. This bench
+gets power-cycled, so `c` and `C` write the request to NVS, and if a stream was asked for and
+nothing has arrived for twenty seconds the board asks again, at most every thirty. It re-applies
+only what was asked for; it never decides on its own that the sensor should be streaming.
+
+## The sensor is in a startup loop (2026-08-11, open)
+
+It ran on 2026-08-10 and does not now. What it says about itself:
+
+```
+/api/v1/system/network  -> carrier true, duplex full, speed 1000
+/api/v1/sensor/config   -> udp_dest 192.168.1.20, 512x10, RNG15_RFL8_NIR8   (as set)
+/api/v1/sensor/metadata/sensor_info -> status INITIALIZING, initialization_id changing
+                                       between consecutive requests
+/api/v1/sensor/alerts   -> 0x0100002a STARTUP/WARNING, over and over:
+                           "Unit has experienced an internal warning during startup
+                            and is restarting."
+```
+
+Every entry in the log is that one alert, on a **12.6 second period** (16.2 s, 28.8, 41.4, 54.0,
+66.7, 79.3, 92.0, 104.6, 117.2, 129.9, 142.5, 155.1, 167.8, 180.4). The unit reruns DHCP each
+time, so the whole sensor is restarting, not just reinitializing. Its HTTP server drops out
+mid-request as it goes.
+
+So this is not a network fault: the link is gigabit, the configuration is right, and the board
+accepts every request with `HTTP 204`. Ouster's first suspect for this alert is **power** — an
+OS1 draws 14–20 W and surges at motor spin-up, and a marginal supply produces exactly this. The
+cabling was disturbed between the working run and this one.
+
 ## The UI rides WiFi
 
 The measurement path is Ethernet; the page is served over the S3's own soft AP, so a phone,
@@ -66,9 +97,14 @@ rather than something the board does on its own.
 | key | |
 |---|---|
 | `i` | ask the sensor what it is |
+| `g<path>` | GET any path on the sensor, printed whole — `g/api/v1/sensor/alerts` |
 | `c` | 512x10, low data rate, `udp_dest` → this board |
 | `C` | 1024x10, full profile — 34 Mbit/s, expect loss |
 | `r` | clear counters |
+
+`g` exists because the useful questions were not the ones the firmware had been built to ask.
+When the sensor stopped coming up, its own alert log said in one line what another day of
+guessing from the outside would not have.
 
 ## Hardware
 
@@ -105,9 +141,12 @@ and the bus is handed over afterwards.
 
 ## Not done yet
 
-- The page has not been opened in a browser — the firmware serves it, but no device has joined
-  the AP yet to look at it.
+- **The sensor's startup loop.** Nothing here can fix it; the board will restore the stream by
+  itself once the sensor stays up.
+- The page has not been opened in a browser — the firmware serves it, and it has been rendered
+  against mock data, but no device has joined the AP to look at the real thing.
 - Three hops, and what TAS does to these numbers. The gap distribution above is the baseline to
   compare against.
-- Whether the sensor's own switch port is actually negotiating 1000M is inferred from the stream
-  existing, not read off the switch.
+- The 1000M figure now comes from the sensor's own `system/network`, not from the switch. Reading
+  it from the LAN9662 side would be independent confirmation; keti-reconfig already reads port
+  speed over CoAP.

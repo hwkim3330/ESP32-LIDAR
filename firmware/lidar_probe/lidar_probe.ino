@@ -19,6 +19,7 @@
 #include <ETH.h>
 #include <HTTPClient.h>
 #include <NetworkUdp.h>
+#include <Preferences.h>
 #include <SPI.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -65,6 +66,21 @@ bool sensorLeased = false;
 // what can be asked of it, so it is read rather than assumed.
 String sensorInfo = "";
 String configResult = "";
+
+// Declared by hand: a default argument defeats the prototype the Arduino build generates, so
+// setup()'s handlers cannot see this function without it.
+bool configureSensor(const char *mode, const char *profile, bool remember = true);
+
+// What the operator asked for, remembered across reboots of either end. The sensor's config is
+// not persistent -- power-cycle it and udp_dest is gone -- and this bench gets power-cycled. So
+// the board re-applies the mode that was asked for, and only that: it never decides on its own
+// that the sensor should be streaming.
+Preferences prefs;
+bool streamRequested = false;
+String requestedMode = "512x10", requestedProfile = "RNG15_RFL8_NIR8";
+int64_t lastReapply = 0;
+uint32_t packetsAtLastCheck = 0;
+int64_t quietSince = 0;
 
 // The page has to serve to something. The PC on this bench has one NIC and it is committed to
 // the office network, so the UI rides the S3's WiFi as a soft AP: any phone, tablet or laptop
@@ -315,6 +331,14 @@ void setup() {
   }
   Serial.printf("ip %s  mac %s\n", ETH.localIP().toString().c_str(), ETH.macAddress().c_str());
 
+  prefs.begin("lidar", false);
+  streamRequested = prefs.getBool("stream", false);
+  requestedMode = prefs.getString("mode", requestedMode);
+  requestedProfile = prefs.getString("profile", requestedProfile);
+  if (streamRequested)
+    Serial.printf("remembered: %s %s -- will re-apply if the sensor goes quiet\n",
+                  requestedMode.c_str(), requestedProfile.c_str());
+
   lidarUdp.begin(kLidarPort);
   imuUdp.begin(kImuPort);
   dhcpUdp.begin(67);
@@ -343,6 +367,7 @@ void setup() {
                 WiFi.softAPIP().toString().c_str(), kApSsid, kApPassword);
 
   bucketStart = esp_timer_get_time();
+  quietSince = bucketStart;
 }
 
 void drain(NetworkUDP &udp, Flow &s, bool timed) {
@@ -455,9 +480,17 @@ bool fetchSensorInfo() {
 // its default profile is about 34 Mbit/s, which the SPI link cannot carry; 512x10 with the
 // low-data-rate profile is roughly a tenth of that. Both are legitimate sensor modes -- nothing
 // here is a workaround, it is choosing an operating point the link can actually serve.
-bool configureSensor(const char *mode, const char *profile) {
+bool configureSensor(const char *mode, const char *profile, bool remember) {
+  if (remember) {
+    streamRequested = true;
+    requestedMode = mode;
+    requestedProfile = profile;
+    prefs.putBool("stream", true);
+    prefs.putString("mode", requestedMode);
+    prefs.putString("profile", requestedProfile);
+  }
   HTTPClient http;
-  http.setTimeout(8000);
+  http.setTimeout(remember ? 8000 : 3000);
   if (!http.begin("http://" + kSensorAddress.toString() + "/api/v1/sensor/config")) return false;
   http.addHeader("Content-Type", "application/json");
   String body = "{\"udp_dest\":\"" + ETH.localIP().toString() + "\"";
@@ -496,8 +529,28 @@ void handleConsole() {
       for (int i = 0; i < kHistory; i++) history[i] = HistoryBucket();
       Serial.println("counters cleared");
       break;
+    case 'g': {
+      // Anything the sensor exposes, without a reflash per question. When the sensor will not
+      // come up, what it says about itself -- alerts especially -- is worth more than another
+      // round of guessing from the outside.
+      const String path = Serial.readStringUntil('\n');
+      HTTPClient http;
+      http.setTimeout(5000);
+      const String url = "http://" + kSensorAddress.toString() + path;
+      Serial.printf("GET %s\n", url.c_str());
+      if (http.begin(url)) {
+        const int code = http.GET();
+        // Printed whole, in chunks. Truncating showed the head of the alert log, which is the
+        // oldest entries -- exactly the part that does not say what is wrong now.
+        const String body = http.getString();
+        Serial.printf("  %d (%u bytes)\n", code, body.length());
+        for (unsigned i = 0; i < body.length(); i += 512) Serial.println(body.substring(i, i + 512));
+        http.end();
+      }
+      break;
+    }
     case '?':
-      Serial.println("i=sensor info  c=512x10 low-rate  C=1024x10 full  r=reset counters");
+      Serial.println("i=info  g<path>=GET  c=512x10 low-rate  C=1024x10 full  r=reset");
       break;
     default:
       break;
@@ -521,6 +574,17 @@ void loop() {
   if (now - bucketStart >= 1000000) {
     bucketStart = now;
     closeBucket();
+    // If a stream was asked for and none is arriving, ask again -- but not oftener than every
+    // thirty seconds, and never before giving it twenty to start on its own. A sensor that is
+    // restarting will simply refuse, which costs one failed connection.
+    if (lidar.packets != packetsAtLastCheck) { packetsAtLastCheck = lidar.packets; quietSince = now; }
+    if (streamRequested && quietSince && now - quietSince > 20000000 &&
+        now - lastReapply > 30000000) {
+      lastReapply = now;
+      Serial.println("no stream: re-applying the remembered configuration");
+      configureSensor(requestedMode.c_str(), requestedProfile.c_str(), false);
+    }
+
     Serial.printf("link %s %uM %s | lidar %lu pkt (%u B, %lu us mean) | imu %lu\n",
                   ETH.linkUp() ? "UP" : "DOWN", ETH.linkSpeed(),
                   ETH.fullDuplex() ? "full" : "half", (unsigned long)lidar.packets, lidar.lastSize,
