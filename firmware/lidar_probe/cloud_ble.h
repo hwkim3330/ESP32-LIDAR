@@ -24,13 +24,31 @@
 #define KETI_CLOUD_STATUS  "6b1e0004-4b2a-4f6d-9c3a-0f1e2d3c4b5a"  // read/notify: one status line
 #define KETI_CLOUD_IMU     "6b1e0005-4b2a-4f6d-9c3a-0f1e2d3c4b5a"  // notify: accel + gyro
 
-constexpr int kCloudBeams = 16;
+// Sized for the largest sensor this bench has, chosen at run time for the one that is plugged in.
+// An OS1-64 has four times the beams of an OS1-16 and the same 512 columns, so the buffer is
+// 64 KB either way and the decimation is what changes.
+constexpr int kCloudBeamsMax = 64;
 constexpr int kCloudColumns = 512;   // one full revolution at 512x10
-constexpr int kSendColumns = 256;    // every other column
+int cloudBeams = 16;                 // set from the sensor's own beam count
+
+// What goes over BLE stays the same size whatever is plugged in: 4096 points, 8 kB, one second.
+// A 64 beam sensor is not four times more legible than a 16 beam one at this link speed -- it is
+// four times slower to arrive, which is worse. So both axes are strided to land on 4096.
+constexpr int kSendPoints = 4096;
+int sendColumns = 256, sendColumnStride = 2, sendBeamStride = 1;
+
+inline void cloudSetBeams(int beams) {
+  cloudBeams = beams;
+  // Keep every beam while there are few, then thin them: 16 beams x 256 columns, or 64 x 64.
+  sendBeamStride = beams > 16 ? beams / 16 : 1;
+  const int beamsSent = beams / sendBeamStride;
+  sendColumns = kSendPoints / beamsSent;
+  sendColumnStride = kCloudColumns / sendColumns;
+}
 constexpr int kChunkPoints = 240;    // 480 bytes of ranges + 6 byte header, inside a 517 MTU
 
 // Ranges in centimetres, indexed [column][beam]. Written by the packet path, read by the sender.
-uint16_t frameRanges[kCloudColumns][kCloudBeams];
+uint16_t frameRanges[kCloudColumns][kCloudBeamsMax];
 volatile bool frameReady = false;
 uint32_t frameSequence = 0;
 
@@ -131,7 +149,8 @@ inline void cloudSendFrame() {
   frameReady = false;
 
   static uint8_t chunk[10 + kChunkPoints * 2];
-  const int pointsPerFrame = kSendColumns * kCloudBeams;
+  const int beamsSent = cloudBeams / sendBeamStride;
+  const int pointsPerFrame = sendColumns * beamsSent;
   const int chunks = (pointsPerFrame + kChunkPoints - 1) / kChunkPoints;
   int point = 0;
   for (int c = 0; c < chunks; c++) {
@@ -140,9 +159,10 @@ inline void cloudSendFrame() {
     chunk[n++] = frameSequence >> 16;  chunk[n++] = frameSequence >> 24;
     chunk[n++] = c;                    chunk[n++] = c >> 8;
     chunk[n++] = chunks;               chunk[n++] = chunks >> 8;
-    chunk[n++] = point / kCloudBeams;  chunk[n++] = (point / kCloudBeams) >> 8;
+    chunk[n++] = point / beamsSent;  chunk[n++] = (point / beamsSent) >> 8;
     for (int i = 0; i < kChunkPoints && point < pointsPerFrame; i++, point++) {
-      const uint16_t range = frameRanges[(point / kCloudBeams) * 2][point % kCloudBeams];
+      const uint16_t range = frameRanges[(point / beamsSent) * sendColumnStride]
+                                        [(point % beamsSent) * sendBeamStride];
       chunk[n++] = range;
       chunk[n++] = range >> 8;
     }

@@ -24,6 +24,7 @@
 #include <WiFi.h>
 
 #include "eth_w5500.h"
+#include "reassemble.h"
 #include "load_task.h"
 #include "cloud_ble.h"
 #include "page.h"
@@ -89,7 +90,10 @@ uint16_t messageId = 1;
 const uint16_t kCoapPort = 5683;
 String switchCatalog = "";
 PortTable portTable;
-const IPAddress kSensorAddress(192, 168, 1, 50);
+// Not const: a replacement sensor arrives with no address of ours, falls back to link-local when
+// nothing answers its DHCP, and has to be reachable there before it can be given a fixed one.
+// The address is where it is now, not where it should be.
+IPAddress kSensorAddress(192, 168, 1, 50);
 uint8_t sensorMac[6] = {0};
 bool sensorLeased = false;
 
@@ -109,6 +113,20 @@ bool configureSensor(const char *mode, const char *profile, bool remember = true
 Preferences prefs;
 bool streamRequested = false;
 String requestedMode = "512x10", requestedProfile = "RNG15_RFL8_NIR8";
+
+// How many columns the sensor puts in one packet, and on a 64 beam unit it is the whole game.
+// A column is 12 bytes of header plus four per pixel, so 64 beams make it 268: sixteen of them
+// is 4352 bytes of payload, which fragments into three IP packets and triples the frame rate the
+// W5500 has to survive. Fragments, not bytes, are what drowned this board once already. Four
+// columns is 1136 bytes and crosses the wire whole.
+// The sensor refuses anything that is not a multiple of 16 -- "columns_per_packet must be a
+// positive multiple of 16" -- so on a 64 beam unit the payload is 32 + 16*268 + 32 = 4352 bytes
+// and fragmentation is not avoidable. What is adjustable is how much of the circle it scans.
+int columnsPerPacket = 16;
+
+// Degrees, thousandths, as the sensor wants them. A robot that drives forwards does not need the
+// half of the world behind it, and every degree dropped is data the link does not have to carry.
+int azimuthStart = 0, azimuthEnd = 360000;
 int64_t lastReapply = 0;
 uint32_t packetsAtLastCheck = 0;
 int64_t quietSince = 0;
@@ -440,6 +458,13 @@ void setup() {
     Serial.printf("remembered: %s %s -- will re-apply if the sensor goes quiet\n",
                   requestedMode.c_str(), requestedProfile.c_str());
 
+  // Off by default. Reassembly works -- 25,039 fragments became 8,345 datagrams at three to one,
+  // with a flat heap -- but taking over the driver's input path stops lwIP receiving anything at
+  // all, and about thirty seconds later the sensor's ARP entry for this board expires and even
+  // the stream it was reassembling stops. Until the passthrough is right this costs more than it
+  // buys, so it is a keypress ('R') rather than a default.
+  onReassembled = acceptReassembled;
+
   lidarUdp.begin(kLidarPort);
   imuUdp.begin(kImuPort);
   dhcpUdp.begin(67);
@@ -501,15 +526,20 @@ int lastMeasurementId = -1;
 void assembleColumns(const uint8_t *p, int length);
 
 // One column of the sensor: 16 beams, each a range in millimetres.
-constexpr int kBeams = 16;
-constexpr int kColumnsPerPacket = 16;
+int kBeams = 16;   // the sensor's beam count, learned from its own calibration
+int kColumnsPerPacket = 16;   // what the sensor was asked for; the packet size confirms it
 constexpr int kPacketHeaderBytes = 32;
 constexpr int kColumnHeaderBytes = 12;
 
 // Every packet contributes its sixteen columns to the frame under construction. When the
 // measurement id wraps, the revolution is complete and the sender is allowed to take it.
 void assembleColumns(const uint8_t *p, int length) {
-  if (length < kPacketHeaderBytes + kColumnsPerPacket * (kColumnHeaderBytes + kBeams * 4)) return;
+  // How many columns are in here is arithmetic, not configuration: the packet is a header, a
+  // footer, and as many columns as fit. Asking the sensor for four and believing the answer would
+  // silently mis-parse every packet if it disagreed.
+  const int columnBytes = kColumnHeaderBytes + kBeams * 4;
+  kColumnsPerPacket = (length - kPacketHeaderBytes - 32) / columnBytes;
+  if (kColumnsPerPacket < 1) return;
   for (int c = 0; c < kColumnsPerPacket; c++) {
     const uint8_t *col = p + kPacketHeaderBytes + c * (kColumnHeaderBytes + kBeams * 4);
     const uint16_t measurementId = col[8] | (col[9] << 8);
@@ -530,16 +560,16 @@ void assembleColumns(const uint8_t *p, int length) {
 }
 
 void decodePacket(const uint8_t *p, int length) {
-  if (length < kPacketHeaderBytes + kColumnsPerPacket * (kColumnHeaderBytes + kBeams * 4)) {
-    Serial.printf("packet is %d bytes, not the 1280 this decoder knows\n", length);
-    return;
-  }
-  for (int c = 0; c < 2; c++) {  // two columns is enough to see whether it is sane
+  const int columnBytes = kColumnHeaderBytes + kBeams * 4;
+  const int columns = (length - kPacketHeaderBytes - 32) / columnBytes;
+  Serial.printf("  %d bytes = header + %d columns of %d beams + footer\n", length, columns, kBeams);
+  if (columns < 1) return;
+  for (int c = 0; c < 1; c++) {  // one column is enough to see whether it is sane
     const uint8_t *col = p + kPacketHeaderBytes + c * (kColumnHeaderBytes + kBeams * 4);
     const uint16_t measurementId = col[8] | (col[9] << 8);
     const uint16_t status = col[10] | (col[11] << 8);
     Serial.printf("  column %u (status %u):", measurementId, status);
-    for (int b = 0; b < kBeams; b++) {
+    for (int b = 0; b < kBeams && b < 16; b++) {
       const uint8_t *px = col + kColumnHeaderBytes + b * 4;
       const uint32_t word = uint32_t(px[0]) | (uint32_t(px[1]) << 8) | (uint32_t(px[2]) << 16) |
                             (uint32_t(px[3]) << 24);
@@ -711,6 +741,8 @@ bool configureSensor(const char *mode, const char *profile, bool remember) {
   body += ",\"udp_port_lidar\":" + String(kLidarPort);
   body += ",\"udp_port_imu\":" + String(kImuPort);
   body += ",\"lidar_mode\":\"" + String(mode) + "\"";
+  body += ",\"columns_per_packet\":" + String(columnsPerPacket);
+  body += ",\"azimuth_window\":[" + String(azimuthStart) + "," + String(azimuthEnd) + "]";
   body += ",\"udp_profile_lidar\":\"" + String(profile) + "\"}";
   const int code = http.POST(body);
   configResult = String("HTTP ") + code + " " + http.getString().substring(0, 200);
@@ -769,25 +801,46 @@ bool fetchBeamGeometry() {
   http.end();
   if (code != 200) { Serial.printf("beam_intrinsics %d\n", code); return false; }
 
-  float angles[2 * kCloudBeams] = {0};
+  static float angles[2 * kCloudBeamsMax] = {0};
+  int found = 0;
   const char *keys[2] = {"beam_altitude_angles", "beam_azimuth_angles"};
   for (int k = 0; k < 2; k++) {
     const int at = body.indexOf(keys[k]);
     if (at < 0) return false;
     int i = body.indexOf('[', at);
     const int end = body.indexOf(']', i);
-    for (int b = 0; b < kCloudBeams && i > 0 && i < end; b++) {
+    for (int b = 0; b < kCloudBeamsMax && i > 0 && i < end; b++) {
+      if (k == 0) found = b + 1;
       i++;
       while (i < end && (body[i] == ' ' || body[i] == ',')) i++;
-      angles[k * kCloudBeams + b] = body.substring(i, end).toFloat();
+      angles[k * kCloudBeamsMax + b] = body.substring(i, end).toFloat();
       i = body.indexOf(',', i);
       if (i < 0 || i > end) break;
     }
   }
-  geometryCharacteristic->setValue((uint8_t *)angles, sizeof(angles));
-  Serial.printf("beam geometry: altitude %.2f..%.2f, azimuth %.2f..%.2f (%u bytes published)\n",
-                angles[0], angles[kCloudBeams - 1], angles[kCloudBeams],
-                angles[2 * kCloudBeams - 1], sizeof(angles));
+  kBeams = found;
+  cloudSetBeams(kBeams);
+
+  // Published as the beams actually sent, with their count in front, because a 64 beam sensor is
+  // thinned to fit the link and the app has to place the ones that arrive rather than the ones
+  // the sensor has.
+  const int beamsSent = kBeams / sendBeamStride;
+  static uint8_t blob[4 + 2 * kCloudBeamsMax * 4];
+  int n = 0;
+  blob[n++] = beamsSent; blob[n++] = beamsSent >> 8;
+  blob[n++] = sendColumns; blob[n++] = sendColumns >> 8;
+  for (int b = 0; b < beamsSent; b++) {
+    const float v = angles[b * sendBeamStride];
+    memcpy(blob + n, &v, 4); n += 4;
+  }
+  for (int b = 0; b < beamsSent; b++) {
+    const float v = angles[kCloudBeamsMax + b * sendBeamStride];
+    memcpy(blob + n, &v, 4); n += 4;
+  }
+  geometryCharacteristic->setValue(blob, n);
+  Serial.printf("beam geometry: %d beams (%d sent, every %d), %d columns sent; "
+                "altitude %.2f..%.2f\n", kBeams, beamsSent, sendBeamStride, sendColumns,
+                angles[0], angles[kBeams - 1]);
   return true;
 }
 
@@ -1017,7 +1070,8 @@ void handleConsole() {
       // Ouster's API takes the override as a bare JSON string.
       HTTPClient http;
       http.setTimeout(8000);
-      const String url = "http://169.254.195.68/api/v1/system/network/ipv4/override";
+      const String url = "http://" + kSensorAddress.toString() +
+                         "/api/v1/system/network/ipv4/override";
       Serial.printf("PUT %s <- \"192.168.1.50/24\"\n", url.c_str());
       if (http.begin(url)) {
         http.addHeader("Content-Type", "application/json");
@@ -1031,7 +1085,7 @@ void handleConsole() {
       // And point it at this board again, at a rate this link carries.
       HTTPClient http;
       http.setTimeout(8000);
-      const String url = "http://169.254.195.68/api/v1/sensor/config";
+      const String url = "http://" + kSensorAddress.toString() + "/api/v1/sensor/config";
       String body = "{\"udp_dest\":\"192.168.1.20\",\"udp_port_lidar\":7502,\"udp_port_imu\":7503";
       body += ",\"lidar_mode\":\"512x10\",\"udp_profile_lidar\":\"RNG15_RFL8_NIR8\"}";
       Serial.printf("POST %s\n", url.c_str());
@@ -1065,6 +1119,43 @@ void handleConsole() {
       Serial.printf("load: asking for %lu frames/s of %d bytes on PCP %u "
                     "(the chip tops out near 420/s, about 4 Mbit/s)\n",
                     (unsigned long)loadFramesPerSecond, kLoadFrameBytes, loadPcp);
+      break;
+    }
+    case 'k': {
+      const String arg = Serial.readStringUntil('\n');
+      const int wanted = arg.toInt();
+      if (wanted < 1 || wanted > 16) { Serial.println("usage: k4   (columns per packet, 1-16)"); break; }
+      columnsPerPacket = wanted;
+      const int payload = 32 + columnsPerPacket * (12 + kBeams * 4) + 32;
+      Serial.printf("columns per packet %d -> payload %d bytes%s\n", columnsPerPacket, payload,
+                    payload > 1472 ? "  (FRAGMENTS -- the board will not survive this)" : "");
+      break;
+    }
+    case 'R': {
+      reassemblyBegin();
+      Serial.println("reassembly on -- and lwIP will go deaf; see reassemble.h");
+      break;
+    }
+    case 'z': {
+      // z180 -- keep a 180 degree window centred on the front. z360 for everything.
+      const String arg = Serial.readStringUntil('\n');
+      const int degrees = arg.toInt();
+      if (degrees < 1 || degrees > 360) { Serial.println("usage: z180   (degrees to keep)"); break; }
+      const int half = degrees * 1000 / 2;
+      azimuthStart = (360000 - half) % 360000;
+      azimuthEnd = half;
+      if (degrees >= 360) { azimuthStart = 0; azimuthEnd = 360000; }
+      Serial.printf("azimuth window %d degrees [%d, %d] -- about %d packets/s at 512x10\n",
+                    degrees, azimuthStart, azimuthEnd, 320 * degrees / 360);
+      break;
+    }
+    case 'a': {
+      // a169.254.142.215 -- point everything at a sensor wherever it currently is.
+      const String arg = Serial.readStringUntil('\n');
+      IPAddress wanted;
+      if (!wanted.fromString(arg)) { Serial.println("usage: a169.254.142.215"); break; }
+      kSensorAddress = wanted;
+      Serial.printf("sensor is at %s now\n", kSensorAddress.toString().c_str());
       break;
     }
     case 'f': {
@@ -1204,6 +1295,16 @@ void serverTask(void *) {
   }
 }
 
+// A datagram that lwIP would have thrown away, arriving by the other door. Everything after this
+// point is the same as if a socket had returned it -- the decoder cannot tell, and should not.
+void acceptReassembled(const uint8_t *payload, int length, uint32_t sourceIp) {
+  if (length > int(kPacketBuffer)) return;
+  memcpy(packet, payload, length);
+  if (dumpNextPacket) { dumpNextPacket = false; decodePacket(packet, length); }
+  assembleColumns(packet, length);
+  recordArrival(lidar, length, IPAddress(__builtin_bswap32(sourceIp)), 7502, true);
+}
+
 void loop() {
   const int64_t passStart = esp_timer_get_time();
   handleConsole();
@@ -1264,6 +1365,12 @@ void loop() {
     // housekeeping that reports it, so this is the previous second's figure.
     cloudSendStatus(last.packets, last.meanInterval, last.maxInterval,
                     uint16_t(lastOutliers), ethLinkSpeed());
+    if (fragmentsSeen)
+      Serial.printf("   heap %lu free (min %lu) | reassembled %lu datagrams from %lu fragments, %lu abandoned\n",
+                    (unsigned long)esp_get_free_heap_size(),
+                    (unsigned long)esp_get_minimum_free_heap_size(),
+                    (unsigned long)datagramsCompleted, (unsigned long)fragmentsSeen,
+                    (unsigned long)datagramsAbandoned);
     Serial.printf("   gaps over %u us: %lu | min gap %lu us | burst %d%s | serve %ld us | house %ld us\n",
                   kOutlierThresholdUs, (unsigned long)lastOutliers,
                   (unsigned long)lastMinInterval, maxBurst,
