@@ -24,6 +24,7 @@
 #include <esp_mac.h>
 #include <esp_netif.h>
 #include <driver/spi_master.h>
+#include "w5500_spi.h"
 
 // Forty, and the number is measured rather than chosen. The part is rated to 80 MHz; this board's
 // traces are not -- at 80 the link does not come up at all. What settles it is that 40 and 60
@@ -103,6 +104,14 @@ inline bool ethStart(int sck, int miso, int mosi, int cs, int pollPeriodMs, cons
   eth_w5500_config_t macConfig = ETH_W5500_DEFAULT_CONFIG(SPI2_HOST, &devcfg);
   macConfig.int_gpio_num = -1;                 // not wired on this board; established by probe
   macConfig.poll_period_ms = pollPeriodMs;     // the whole point of not using ETH.begin
+  // Our SPI layer under the driver, so a read that crosses the end of the receive buffer is
+  // split at the boundary instead of failing. See w5500_spi.h -- it is the one thing every
+  // failure on this bench has had in common.
+  macConfig.custom_spi_driver.config = &macConfig;
+  macConfig.custom_spi_driver.init = w5500SpiInit;
+  macConfig.custom_spi_driver.deinit = w5500SpiDeinit;
+  macConfig.custom_spi_driver.read = w5500SpiRead;
+  macConfig.custom_spi_driver.write = w5500SpiWrite;
 
   eth_mac_config_t macCommon = ETH_MAC_DEFAULT_CONFIG();
   eth_phy_config_t phyConfig = ETH_PHY_DEFAULT_CONFIG();
