@@ -1,0 +1,54 @@
+# Pace the sensor's stream on the way out to the ESP, so it stops arriving in bursts.
+#
+#   cd /home/kim/keti-tsn-cli-new
+#   node bin/keti-tsn.js patch /home/kim/esp32-lidar/tools/shaper-tc0.yaml \
+#       --transport serial -d /dev/ttyACM2
+#
+# This is the one lever left after the ESP ran out of them. An OS1-64 sends a 4352 byte datagram,
+# which on any ordinary link is three 1514 byte frames back to back at line rate. The W5500 does
+# not overflow on the average -- it carried 3.3 Mbit/s from a 16 beam sensor for hours, and it
+# transmits 8 Mbit/s for three minutes without an error -- it overflows on those three frames
+# arriving with an interframe gap and nothing else between them. Narrowing the sensor to a 90
+# degree window cut the average to 2.8 Mbit/s and changed nothing, which is what says the average
+# is the wrong variable.
+#
+# A shaper, not a policer. Both live under mchp-velocitysp-port:eth-qos, and the difference is the
+# whole point: a policer is ingress and drops what exceeds the rate, a shaper is egress and delays
+# it. Dropping two frames of every three does not deliver a datagram at all, since a missing
+# fragment discards the other two as well.
+#
+# A leaky bucket rather than credit-based, for the same reason. The credit-based shaper's only
+# knob here is idle-slope; the leaky bucket also takes committed-burst-size, and the burst size is
+# exactly the quantity in question. Small enough and the second frame of a datagram has to wait
+# for the bucket to refill, which is the interframe spacing the chip needs.
+#
+# IT DOES NOT WORK ON THIS BUILD. Kept because the negative result cost an afternoon and the
+# reasoning above is still the right reasoning.
+#
+# The device takes the write, and reads it back exactly as written. It then ignores it. Measured
+# at the receiver, which is the only account of this switch worth believing:
+#
+#   | shaper on port 1                       | arriving at the ESP |
+#   |----------------------------------------|---------------------|
+#   | none                                   | 320 datagrams/s     |
+#   | TC0, 20 Mbit/s, 3000 byte bucket       | 321/s               |
+#   | TC0,  5 Mbit/s, 1600 byte bucket       | 318/s               |
+#   | TC0,  1 Mbit/s, 1600 byte bucket       | 321/s               |
+#   | ALL EIGHT classes, 1 Mbit/s, 1600 byte | 320/s               |
+#
+# 320 datagrams a second is 11 Mbit/s. Eleven megabits through a one megabit shaper, on every
+# traffic class at once, is not a traffic-class mismatch -- it is a shaper that does nothing.
+# The port is right: port 1 reads speed 0.100 and 2.09 GB out, port 2 reads 1.000 and 2.11 GB in,
+# so 1 faces the ESP and 2 faces the sensor. The traffic class is right too, or at least it cannot
+# be wrong across all eight at once.
+#
+# This is the fifth thing this switch has said about itself that measurement contradicted, after
+# out-discards, config-change-error, oper-control-list and the entry count. The gate schedule is
+# still the one shaping mechanism on this device that has been shown to do what it claims -- and a
+# gate cannot fix this, because it bunches frames harder rather than spacing them.
+#
+# Port 1 is the ESP's. Traffic class 0 is where an untagged stream lands.
+- ? "/ietf-interfaces:interfaces/interface[name='1']/mchp-velocitysp-port:eth-qos/config/traffic-class-shapers[traffic-class='0']/single-leaky-bucket/committed-information-rate"
+  : 20000000
+- ? "/ietf-interfaces:interfaces/interface[name='1']/mchp-velocitysp-port:eth-qos/config/traffic-class-shapers[traffic-class='0']/single-leaky-bucket/committed-burst-size"
+  : 3000
