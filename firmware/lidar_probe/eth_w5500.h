@@ -42,6 +42,12 @@ constexpr int kEthSpiMhz = 20;
 
 static esp_eth_handle_t gEthHandle = nullptr;
 static esp_netif_t *gEthNetif = nullptr;
+static esp_eth_netif_glue_handle_t gEthGlue = nullptr;
+
+// What ethStart was called with. A restart has to rebuild the driver exactly, and asking the
+// caller to pass it all again would put the pin map in two places.
+struct EthSetup { int sck, miso, mosi, cs, pollPeriodMs; bool tenMegabit; };
+static EthSetup gEthSetup = {};
 
 // There is no ioctl for link state -- the driver reports it as an event -- so it is tracked
 // here. The W5500's PHYCFGR would answer directly but the bus belongs to the driver now, and
@@ -60,6 +66,8 @@ inline bool ethStart(int sck, int miso, int mosi, int cs, int pollPeriodMs, cons
   // esp_netif and the lwIP task have to exist before any of this. Arduino normally brings them
   // up inside ETH.begin or WiFi.mode; skipping ETH means asking for them explicitly, and
   // skipping THAT means a null-queue assert the moment the first socket is opened.
+  gEthSetup = {sck, miso, mosi, cs, pollPeriodMs, tenMegabit};
+
   esp_netif_init();
   esp_event_loop_create_default();  // both are safe to call twice
 
@@ -127,7 +135,8 @@ inline bool ethStart(int sck, int miso, int mosi, int cs, int pollPeriodMs, cons
   ipInfo.gw.addr = uint32_t(gateway);
   esp_netif_set_ip_info(gEthNetif, &ipInfo);
 
-  if (esp_netif_attach(gEthNetif, esp_eth_new_netif_glue(gEthHandle)) != ESP_OK) return false;
+  gEthGlue = esp_eth_new_netif_glue(gEthHandle);
+  if (esp_netif_attach(gEthNetif, gEthGlue) != ESP_OK) return false;
   if (esp_eth_start(gEthHandle) != ESP_OK) return false;
 
   // Ten megabit on purpose, and through the driver rather than behind its back: writing PHYCFGR
@@ -178,4 +187,40 @@ inline String ethMacAddress() {
   snprintf(out, sizeof(out), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3],
            mac[4], mac[5]);
   return String(out);
+}
+
+// Bring the MAC back from a wedged receive.
+//
+// The failure this exists for: three 1514 byte frames arrive back to back -- one fragmented
+// datagram from a 64 beam sensor -- the chip's receive buffer overflows, its read pointer and the
+// driver's disagree, and the driver spends the rest of the boot retrying one impossible read
+// ("read payload failed, len=1434, offset=48102"). Nothing above it recovers, because nothing
+// above it is told; lwIP simply stops receiving and the board looks alive.
+//
+// Six ways of preventing the overflow were tried and none worked -- see docs/os1-64.md. So this
+// does not prevent it, it recovers from it.
+//
+// Stop and start is shallower than the fault: esp_eth_start only reopens the socket, while the
+// chip's own reset lives in the MAC's init, which runs at driver_install and nowhere else. This
+// board has no RST pin wired, so that software reset is the only reset there is.
+//
+// Tearing the driver down and building it again was the obvious answer and it does not work.
+// stop, del_netif_glue and driver_uninstall all return ESP_OK, and then esp_eth_mac_new_w5500
+// returns NULL -- the SPI device the old MAC owned is not released, so a second one cannot be
+// made. Once that happens the board has no MAC at all, which is worse than a wedged one.
+//
+// So this stays shallow, and the caller escalates. Shallow restarts do eventually clear it --
+// twenty-four of them in one measured run, over about ninety seconds -- and when they do not,
+// a reboot does, in two.
+//
+// That is worth having rather than settling for, given what this data is: a point cloud published
+// to a tablet once a second. Losing a second of a room that is not moving costs nothing. Losing
+// every second after the first fifteen costs the demonstration.
+inline bool ethRestart() {
+  if (!gEthHandle) return false;
+  gEthLinkUp = false;
+  const bool ok = esp_eth_stop(gEthHandle) == ESP_OK &&
+                  (vTaskDelay(pdMS_TO_TICKS(50)), esp_eth_start(gEthHandle) == ESP_OK);
+  vTaskDelay(pdMS_TO_TICKS(50));
+  return ok;
 }

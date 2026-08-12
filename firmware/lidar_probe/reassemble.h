@@ -125,7 +125,19 @@ void reassemblyTask(void *) {
   }
 }
 
+bool reassemblyActive = false;
+
+// Taking the driver's input path has to be redone after the driver is reinstalled, and it is
+// reinstalled whenever the receive path wedges. Without this the first recovery silently returns
+// every frame to lwIP, reassembly stops, and the stream looks like it never came back.
+inline void reassemblyHook() {
+  if (reassemblyActive) esp_eth_update_input_path(gEthHandle, ethernetInput, nullptr);
+}
+
 inline void reassemblyBegin() {
-  xTaskCreatePinnedToCore(reassemblyTask, "reassemble", 8192, nullptr, 3, nullptr, 1);
-  esp_eth_update_input_path(gEthHandle, ethernetInput, nullptr);
+  if (!reassemblyActive) {
+    xTaskCreatePinnedToCore(reassemblyTask, "reassemble", 8192, nullptr, 3, nullptr, 1);
+    reassemblyActive = true;
+  }
+  reassemblyHook();
 }

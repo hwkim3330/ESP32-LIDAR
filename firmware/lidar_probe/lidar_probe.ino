@@ -166,6 +166,8 @@ struct Flow {
   uint16_t sourcePort = 0;
 };
 Flow lidar, imu, scan;
+bool reassemblyPending = false;
+uint32_t ethRestarts = 0;   // how often the receive path had to be brought back
 
 // One second of history per bucket, two minutes deep. Rate and jitter are computed here rather
 // than in the browser so that a page reload does not lose the record.
@@ -460,6 +462,7 @@ void setup() {
   // wedges after twelve to twenty-six seconds every time. Narrowing the window is what makes the
   // rate survivable -- and it can only be written while the chip still works, so it has to happen
   // at boot, from what was saved, not from a keypress thirty seconds later.
+  if (prefs.getBool("reasm", false)) reassemblyPending = true;
   azimuthStart = prefs.getInt("azstart", azimuthStart);
   azimuthEnd = prefs.getInt("azend", azimuthEnd);
   columnsPerPacket = prefs.getInt("cols", columnsPerPacket);
@@ -483,6 +486,10 @@ void setup() {
   // the stream it was reassembling stops. Until the passthrough is right this costs more than it
   // buys, so it is a keypress ('R') rather than a default.
   onReassembled = acceptReassembled;
+  if (reassemblyPending) {
+    reassemblyBegin();
+    Serial.println("reassembly on (remembered)");
+  }
 
   lidarUdp.begin(kLidarPort);
   imuUdp.begin(kImuPort);
@@ -1155,6 +1162,10 @@ void handleConsole() {
     }
     case 'R': {
       reassemblyBegin();
+      // Remembered, because the board reboots itself now when the receive path cannot be brought
+      // back any other way, and a reboot that comes up without reassembly is a board that quietly
+      // stops delivering the thing it was rebooted to deliver.
+      prefs.putBool("reasm", true);
       Serial.println("reassembly on -- and lwIP will go deaf; see reassemble.h");
       break;
     }
@@ -1362,6 +1373,51 @@ void loop() {
       Serial.println("TAS: no packets for eight seconds -- reverting to open");
       revertTas("1");
       tasActive = 0;
+    }
+
+    // Notice a wedged receive path and restart the MAC.
+    //
+    // Everything arriving is counted here -- the sensor's packets, its IMU, and the fragments the
+    // reassembler sees -- because the wedge stops all of them at once. That is what distinguishes
+    // it from a sensor that has simply been unplugged: a quiet sensor leaves the board able to
+    // answer a ping, a wedged W5500 does not.
+    //
+    // Only after the board has seen traffic. Without that this would restart the MAC every two
+    // seconds on a bench where the sensor is off, which is a worse failure than the one it is
+    // for, and harder to recognise.
+    static uint32_t arrivedAtCheck = 0;
+    static int64_t arrivedChangedAt = 0;
+    static bool everArrived = false;
+    const uint32_t arrived = lidar.packets + imu.packets + fragmentsSeen;
+    if (arrived != arrivedAtCheck) {
+      arrivedAtCheck = arrived;
+      arrivedChangedAt = now;
+      if (arrived > 100) everArrived = true;
+    } else if (everArrived && gEthLinkUp && arrivedChangedAt &&
+               now - arrivedChangedAt > 2000000) {
+      arrivedChangedAt = now;
+      ethRestarts++;
+      Serial.printf("nothing has arrived for two seconds -- restarting the MAC (%lu)\n",
+                    (unsigned long)ethRestarts);
+      // The hook goes back on whatever the restart reports. It reported failure once while the
+      // link came back anyway, and the cost of that was the stream never returning: fragments
+      // went to lwIP, which drops them, while the IMU kept arriving and kept this watchdog quiet.
+      // A stream that is silently gone is worse than a hook re-registered for nothing.
+      ethRestart();
+      // Whatever the restart reports. It has reported failure while the link came back anyway,
+      // and the cost of skipping this was the stream never returning: fragments went to lwIP,
+      // which drops them, while the IMU kept arriving and kept this watchdog quiet.
+      reassemblyHook();
+
+      // Escalate. A shallow restart clears the fault eventually but not reliably -- twenty-four
+      // of them over ninety seconds in one measured run -- and there is no deeper one available
+      // (see eth_w5500.h). Ten failures is fifteen seconds of nothing, by which point a two
+      // second reboot is the shorter outage.
+      if (ethRestarts % 10 == 0) {
+        Serial.println("ten restarts have not brought it back -- rebooting");
+        Serial.flush();
+        ESP.restart();
+      }
     }
 
     static bool geometryPublished = false;
