@@ -77,6 +77,11 @@ inline bool ethStart(int sck, int miso, int mosi, int cs, int pollPeriodMs, cons
   buscfg.sclk_io_num = sck;
   buscfg.quadwp_io_num = -1;
   buscfg.quadhd_io_num = -1;
+  // Not the default 4092. Every read this driver has ever failed on straddles the end of the
+  // chip's 16 kB receive buffer -- twelve out of twelve, across two runs, with in-buffer offsets
+  // between 15014 and 16270 and nothing else ever failing. That is a wrap, not an overflow, and
+  // a wrap is where a driver computes a second length that has to fit in one transaction.
+  buscfg.max_transfer_sz = 20000;
   if (spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) return false;
 
   spi_device_interface_config_t devcfg = {};
