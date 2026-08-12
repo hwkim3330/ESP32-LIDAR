@@ -22,11 +22,25 @@
 extern esp_netif_t *gEthNetif;
 extern esp_eth_handle_t gEthHandle;
 
-// One datagram at a time. The sensor sends its fragments back to back and in order, so a single
-// slot is enough; a fragment for a different identifier while one is in progress means the one in
-// progress was never going to complete, and dropping it is better than holding it.
+// Two slots, and nothing but copying happens in the driver's thread.
+//
+// The first version decoded the datagram inside the input callback -- 4352 bytes copied and a
+// thousand pixels unpacked, at 320 a second, in the thread whose job is to empty the W5500 before
+// it overflows. It does overflow: the driver starts reporting `spi transmit failed` and
+// `read payload failed, len=1434, offset=48102`, which is a read pointer that has run off the
+// end, and from then on it is wedged and lwIP receives nothing either. The SPI errors and the
+// deaf network were one fault, not two.
+//
+// So the callback fills a buffer and swaps it. A task on the other core does the work. The board
+// has two cores and this is what the second one is for.
 constexpr int kMaxDatagram = 8192;
-uint8_t reassembled[kMaxDatagram];
+uint8_t reassembleSlots[2][kMaxDatagram];
+int reassembleSlot = 0;
+volatile int readySlot = -1;
+volatile int readyLength = 0;
+volatile uint32_t readySource = 0;
+volatile uint32_t datagramsDropped = 0;
+#define reassembled (reassembleSlots[reassembleSlot])
 int reassembledLength = 0;
 uint16_t reassemblyId = 0;
 int reassemblyHave = 0;
@@ -80,9 +94,17 @@ esp_err_t ethernetInput(esp_eth_handle_t handle, uint8_t *frame, uint32_t length
         if (reassembledLength && reassemblyHave >= reassembledLength) {
           reassemblyOpen = false;
           datagramsCompleted++;
-          if (onReassembled)
-            onReassembled(reassembled + 8, reassembledLength - 8,
-                          (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15]);
+          // Hand it over and take the other slot. If the decoder has not finished with the last
+          // one, this one is dropped -- late is worse than missing for a sensor that will send
+          // another in three milliseconds, and stalling here is what wedged the driver before.
+          if (readySlot < 0) {
+            readyLength = reassembledLength - 8;
+            readySource = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
+            readySlot = reassembleSlot;
+            reassembleSlot ^= 1;
+          } else {
+            datagramsDropped++;
+          }
         }
         free(frame);
         return ESP_OK;
@@ -92,6 +114,18 @@ esp_err_t ethernetInput(esp_eth_handle_t handle, uint8_t *frame, uint32_t length
   return esp_netif_receive(gEthNetif, frame, length, nullptr);
 }
 
+// The other core. Priority above the Arduino loop so a datagram is decoded promptly, and a tick
+// of sleep when there is nothing, so the idle task still runs and the watchdog stays quiet.
+void reassemblyTask(void *) {
+  for (;;) {
+    const int slot = readySlot;
+    if (slot < 0) { vTaskDelay(1); continue; }
+    if (onReassembled) onReassembled(reassembleSlots[slot] + 8, readyLength, readySource);
+    readySlot = -1;
+  }
+}
+
 inline void reassemblyBegin() {
+  xTaskCreatePinnedToCore(reassemblyTask, "reassemble", 8192, nullptr, 3, nullptr, 1);
   esp_eth_update_input_path(gEthHandle, ethernetInput, nullptr);
 }
