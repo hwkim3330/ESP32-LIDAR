@@ -454,9 +454,28 @@ void setup() {
   streamRequested = prefs.getBool("stream", false);
   requestedMode = prefs.getString("mode", requestedMode);
   requestedProfile = prefs.getString("profile", requestedProfile);
-  if (streamRequested)
-    Serial.printf("remembered: %s %s -- will re-apply if the sensor goes quiet\n",
-                  requestedMode.c_str(), requestedProfile.c_str());
+  // The azimuth window is remembered too, and it has to be, because it is the only setting that
+  // decides whether this board survives the sensor at all. A 64 beam sensor at 512x10 puts about
+  // 11 Mbit/s of 1500 byte frames into the W5500 whether or not anything reads them, and the chip
+  // wedges after twelve to twenty-six seconds every time. Narrowing the window is what makes the
+  // rate survivable -- and it can only be written while the chip still works, so it has to happen
+  // at boot, from what was saved, not from a keypress thirty seconds later.
+  azimuthStart = prefs.getInt("azstart", azimuthStart);
+  azimuthEnd = prefs.getInt("azend", azimuthEnd);
+  columnsPerPacket = prefs.getInt("cols", columnsPerPacket);
+  if (streamRequested) {
+    Serial.printf("remembered: %s %s, azimuth [%d, %d] -- applying now\n",
+                  requestedMode.c_str(), requestedProfile.c_str(), azimuthStart, azimuthEnd);
+    // Now, not in thirty seconds. The quiet-stream watchdog below waits twenty seconds before
+    // asking again, which was fine when the sensor was a 16 beam one: the link was never in
+    // danger and a late re-apply cost nothing. With a 64 beam sensor it is the whole game. The
+    // sensor keeps its settings only while powered, so after any power cut it comes back at a
+    // full 360 degrees, which is 11 Mbit/s of 1500 byte frames into a chip that wedges under
+    // that load in twelve to twenty-six seconds. The narrowed window can only be written while
+    // the chip still works, so this is a race, and it is won by starting it here rather than
+    // after the first failure.
+    configureSensor(requestedMode.c_str(), requestedProfile.c_str(), false);
+  }
 
   // Off by default. Reassembly works -- 25,039 fragments became 8,345 datagrams at three to one,
   // with a flat heap -- but taking over the driver's input path stops lwIP receiving anything at
@@ -732,6 +751,9 @@ bool configureSensor(const char *mode, const char *profile, bool remember) {
     prefs.putBool("stream", true);
     prefs.putString("mode", requestedMode);
     prefs.putString("profile", requestedProfile);
+    prefs.putInt("azstart", azimuthStart);
+    prefs.putInt("azend", azimuthEnd);
+    prefs.putInt("cols", columnsPerPacket);
   }
   HTTPClient http;
   http.setTimeout(remember ? 8000 : 3000);
@@ -1145,7 +1167,10 @@ void handleConsole() {
       azimuthStart = (360000 - half) % 360000;
       azimuthEnd = half;
       if (degrees >= 360) { azimuthStart = 0; azimuthEnd = 360000; }
-      Serial.printf("azimuth window %d degrees [%d, %d] -- about %d packets/s at 512x10\n",
+      prefs.putInt("azstart", azimuthStart);
+      prefs.putInt("azend", azimuthEnd);
+      Serial.printf("azimuth window %d degrees [%d, %d] -- about %d packets/s at 512x10, "
+                    "saved and applied at every boot\n",
                     degrees, azimuthStart, azimuthEnd, 320 * degrees / 360);
       break;
     }

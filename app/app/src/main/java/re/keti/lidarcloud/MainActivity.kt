@@ -47,9 +47,11 @@ class MainActivity : AppCompatActivity() {
 
         link = CloudLink(this).apply {
             onStatus = { hud.status = it; hud.invalidate() }
-            onGeometry = { altitudes, azimuths ->
-                cloud.setGeometry(altitudes, azimuths)
-                hud.status = "${altitudes.size} beams, ${altitudes.first()}° to ${altitudes.last()}°"
+            onGeometry = { altitudes, azimuths, columns ->
+                cloud.setGeometry(altitudes, azimuths, columns)
+                hud.framePoints = altitudes.size * columns
+                hud.status = "${altitudes.size} beams x $columns columns, " +
+                    "${altitudes.first()}° to ${altitudes.last()}°"
                 hud.invalidate()
             }
             onFrame = { ranges, received ->

@@ -31,18 +31,25 @@ constexpr int kCloudBeamsMax = 64;
 constexpr int kCloudColumns = 512;   // one full revolution at 512x10
 int cloudBeams = 16;                 // set from the sensor's own beam count
 
-// What goes over BLE stays the same size whatever is plugged in: 4096 points, 8 kB, one second.
-// A 64 beam sensor is not four times more legible than a 16 beam one at this link speed -- it is
-// four times slower to arrive, which is worse. So both axes are strided to land on 4096.
-constexpr int kSendPoints = 4096;
+// How many points a frame may cost, measured rather than assumed. A chunk is 240 points and the
+// sender waits 12 ms after each, so 4096 points is 18 chunks and 216 ms -- a fifth of the one
+// second budget. There is room for twice that, and on a 64 beam sensor it is worth spending:
+// vertical detail is the entire reason for the larger sensor, and thinning it to 16 beams throws
+// away exactly what was paid for. So the budget follows the sensor.
+//
+// Horizontal resolution is held at 256 columns in both cases. Below that the walls of a room stop
+// being lines and become dots, which reads as a worse sensor rather than a coarser one.
+int sendPoints = 4096;
 int sendColumns = 256, sendColumnStride = 2, sendBeamStride = 1;
 
 inline void cloudSetBeams(int beams) {
   cloudBeams = beams;
-  // Keep every beam while there are few, then thin them: 16 beams x 256 columns, or 64 x 64.
-  sendBeamStride = beams > 16 ? beams / 16 : 1;
+  // Every beam up to 32; beyond that every other one. An OS1-64 goes out as 32 x 256 -- half the
+  // beams over the full 45 degrees, which still resolves a doorway from a wall.
+  sendBeamStride = beams > 32 ? (beams + 31) / 32 : 1;
   const int beamsSent = beams / sendBeamStride;
-  sendColumns = kSendPoints / beamsSent;
+  sendColumns = 256;
+  sendPoints = beamsSent * sendColumns;
   sendColumnStride = kCloudColumns / sendColumns;
 }
 constexpr int kChunkPoints = 240;    // 480 bytes of ranges + 6 byte header, inside a 517 MTU
@@ -150,7 +157,7 @@ inline void cloudSendFrame() {
 
   static uint8_t chunk[10 + kChunkPoints * 2];
   const int beamsSent = cloudBeams / sendBeamStride;
-  const int pointsPerFrame = sendColumns * beamsSent;
+  const int pointsPerFrame = sendPoints;
   const int chunks = (pointsPerFrame + kChunkPoints - 1) / kChunkPoints;
   int point = 0;
   for (int c = 0; c < chunks; c++) {

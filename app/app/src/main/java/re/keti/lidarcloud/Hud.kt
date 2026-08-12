@@ -37,6 +37,11 @@ class Hud(context: Context) : View(context) {
 
     var status = "starting…"
     var frames = 0
+
+    // How many points a whole frame is, which depends on the sensor: the board thins a 64 beam
+    // sensor to 32 x 256 and sends a 16 beam one as 16 x 256. Shown as the denominator of what
+    // arrived and as the top of that graph, so a full frame reads as full on either sensor.
+    var framePoints = 4096
     var pointsReceived = 0
     var pointsDrawn = 0
 
@@ -108,7 +113,7 @@ class Hud(context: Context) : View(context) {
         y = panel(canvas, pad, y, panelWidth, dp(86f)) { top ->
             tile(canvas, pad + dp(14f), top + dp(14f), "FRAME", frames.toString())
             tile(canvas, pad + dp(110f), top + dp(14f), "RECEIVED",
-                "$pointsReceived/${CloudLink.POINTS}")
+                "$pointsReceived/$framePoints")
             tile(canvas, pad + dp(206f), top + dp(14f), "DRAWN", pointsDrawn.toString())
         }
 
@@ -130,7 +135,7 @@ class Hud(context: Context) : View(context) {
         y = legend(canvas, pad, y, panelWidth)
 
         y = graph(canvas, pad, y, panelWidth, "Points per frame", pointHistory,
-            listOf(series), CloudLink.POINTS.toFloat(), "of ${CloudLink.POINTS}")
+            listOf(series), framePoints.toFloat(), "of $framePoints")
 
         y = graph(canvas, pad, y, panelWidth, "Acceleration  (g)", null,
             listOf(series, seriesB, seriesC), 2f, fmt3(accel), accelHistory)

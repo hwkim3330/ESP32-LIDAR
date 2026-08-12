@@ -42,8 +42,8 @@ class CloudView(context: Context) : GLSurfaceView(context) {
         renderMode = RENDERMODE_CONTINUOUSLY
     }
 
-    fun setGeometry(altitudes: FloatArray, azimuths: FloatArray) =
-        renderer.setGeometry(altitudes, azimuths)
+    fun setGeometry(altitudes: FloatArray, azimuths: FloatArray, columns: Int) =
+        renderer.setGeometry(altitudes, azimuths, columns)
 
     fun setFrame(ranges: ShortArray) = renderer.setFrame(ranges)
 
@@ -128,18 +128,24 @@ class CloudRenderer : GLSurfaceView.Renderer {
 
     // Three floats per point, rebuilt whenever a frame lands.
     private var vertices: FloatBuffer =
-        ByteBuffer.allocateDirect(CloudLink.POINTS * 3 * 4)
+        ByteBuffer.allocateDirect(CloudLink.MAX_POINTS * 3 * 4)
             .order(ByteOrder.nativeOrder()).asFloatBuffer()
     private var vertexCount = 0
 
-    private var altitudes = FloatArray(CloudLink.BEAMS) { 0f }
-    private var azimuths = FloatArray(CloudLink.BEAMS) { 0f }
+    // Empty until the geometry arrives, and nothing is drawn before it does. Their length IS the
+    // beam count -- the board sends one angle per beam it actually transmits, so there is no
+    // second place for the shape to be stored and no way for the two to disagree.
+    private var altitudes = FloatArray(0)
+    private var azimuths = FloatArray(0)
+    private var columns = 256
     private var pendingRanges: ShortArray? = null
-    private val heightSample = FloatArray(CloudLink.POINTS / 4 + 1)
+    private val heightSample = FloatArray(CloudLink.MAX_POINTS / 4 + 1)
 
-    fun setGeometry(a: FloatArray, z: FloatArray) {
-        if (a.size >= CloudLink.BEAMS) altitudes = a
-        if (z.size >= CloudLink.BEAMS) azimuths = z
+    fun setGeometry(a: FloatArray, z: FloatArray, columnsSent: Int) {
+        if (a.isEmpty() || z.size < a.size) return
+        altitudes = a
+        azimuths = z
+        columns = columnsSent
     }
 
     fun setFrame(ranges: ShortArray) { pendingRanges = ranges }
@@ -329,18 +335,26 @@ class CloudRenderer : GLSurfaceView.Renderer {
     }
 
     /**
-     * Spherical to cartesian, once per frame. The board sends every other column of a 512 column
-     * revolution, so column i is at i/256 of a turn; the per-beam azimuth offset is the sensor's
-     * own correction for where each laser actually points.
+     * Spherical to cartesian, once per frame. The board sends a strided subset of a 512 column
+     * revolution, so column i of the ones sent is at i/columns of a turn; the per-beam azimuth
+     * offset is the sensor's own correction for where each laser actually points.
+     *
+     * The shape comes from the geometry, never from a constant. Both sensors this board has
+     * carried send 256 columns, but one has 16 beams and the other 32, and reading a 32 beam
+     * frame on a 16 beam lattice draws the room twice, interleaved and both halves wrong.
      */
     private fun rebuild(ranges: ShortArray) {
+        val beams = altitudes.size
+        if (beams == 0) { vertexCount = 0; return }
         vertices.position(0)
         var n = 0
         var sampled = 0
-        for (column in 0 until CloudLink.COLUMNS) {
-            val turn = column.toFloat() / CloudLink.COLUMNS
-            for (beam in 0 until CloudLink.BEAMS) {
-                val centimetres = ranges[column * CloudLink.BEAMS + beam].toInt() and 0xFFFF
+        for (column in 0 until columns) {
+            val turn = column.toFloat() / columns
+            for (beam in 0 until beams) {
+                val index = column * beams + beam
+                if (index >= ranges.size) break
+                val centimetres = ranges[index].toInt() and 0xFFFF
                 if (centimetres == 0) continue          // no return: not a point at the origin
                 val r = centimetres / 100f
                 val theta = Math.toRadians((360.0 * turn) + azimuths[beam])

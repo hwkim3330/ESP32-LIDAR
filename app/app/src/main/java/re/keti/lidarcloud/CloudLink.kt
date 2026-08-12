@@ -41,13 +41,21 @@ class CloudLink(private val context: Context) {
         val STATUS: UUID = UUID.fromString("6b1e0004-4b2a-4f6d-9c3a-0f1e2d3c4b5a")
         val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-        const val BEAMS = 16
-        const val COLUMNS = 256          // the board sends every other column
-        const val POINTS = BEAMS * COLUMNS
+        // The largest shape the board will ever send. The actual one arrives with the geometry
+        // and is smaller: the board thins whatever is plugged in down to about 4096 points, so a
+        // 16 beam sensor comes as 16 x 256 and a 64 beam one as 16 x 256 too -- same points, four
+        // times the vertical field, every fourth beam. Buffers are sized for the maximum once and
+        // never resized, because a frame arrives every second and allocation is not free.
+        const val MAX_POINTS = 8192
     }
 
+    /** The shape currently being sent, learned from the geometry characteristic. */
+    var beams = 16; private set
+    var columns = 256; private set
+    private val points get() = beams * columns
+
     var onStatus: (String) -> Unit = {}
-    var onGeometry: (FloatArray, FloatArray) -> Unit = { _, _ -> }
+    var onGeometry: (FloatArray, FloatArray, Int) -> Unit = { _, _, _ -> }
     var onFrame: (ShortArray, Int) -> Unit = { _, _ -> }
     var onImu: (FloatArray, FloatArray) -> Unit = { _, _ -> }
 
@@ -57,7 +65,7 @@ class CloudLink(private val context: Context) {
     private val main = Handler(Looper.getMainLooper())
     private var gatt: BluetoothGatt? = null
 
-    private var frame = ShortArray(POINTS)
+    private var frame = ShortArray(MAX_POINTS)
     private var frameSequence = -1
     private var received = 0
 
@@ -181,22 +189,36 @@ class CloudLink(private val context: Context) {
     }
 
     /**
-     * Thirty-two little-endian floats: sixteen altitude angles then sixteen azimuth offsets.
+     * `[u16 beams][u16 columns]` then that many little-endian altitude angles and as many azimuth
+     * offsets. The counts are in front because the shape is the sensor's, not the app's: this
+     * board has had a 16 beam sensor and a 64 beam one on it, and hardcoding either meant every
+     * point of the other landed on the wrong beam -- a room drawn as four overlapping rooms.
      *
-     * It used to be the sensor's JSON, and that was a real bug rather than a style choice. The
-     * document is 678 bytes, a characteristic read returns at most 512, so what arrived was a
-     * truncated document that failed to parse -- leaving every altitude angle at zero, which puts
-     * every point at z = 0 and draws a room as a perfectly flat disc.
+     * The floats used to be the sensor's JSON, and that was a real bug rather than a style
+     * choice. The document is 678 bytes, a characteristic read returns at most 512, so what
+     * arrived was a truncated document that failed to parse -- leaving every altitude angle at
+     * zero, which puts every point at z = 0 and draws a room as a perfectly flat disc.
      */
     private fun parseGeometry(data: ByteArray) {
-        if (data.size < BEAMS * 2 * 4) {
-            say("geometry is ${data.size} bytes, expected ${BEAMS * 2 * 4}")
+        if (data.size < 4) { say("geometry is ${data.size} bytes"); return }
+        val b = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val sentBeams = b.getShort(0).toInt() and 0xFFFF
+        val sentColumns = b.getShort(2).toInt() and 0xFFFF
+        if (sentBeams !in 1..256 || sentColumns !in 1..2048 ||
+            sentBeams * sentColumns > MAX_POINTS || data.size < 4 + sentBeams * 2 * 4) {
+            say("geometry says ${sentBeams}x$sentColumns in ${data.size} bytes -- ignored")
             return
         }
-        val b = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-        val altitudes = FloatArray(BEAMS) { b.getFloat(it * 4) }
-        val azimuths = FloatArray(BEAMS) { b.getFloat((BEAMS + it) * 4) }
-        main.post { onGeometry(altitudes, azimuths) }
+        val altitudes = FloatArray(sentBeams) { b.getFloat(4 + it * 4) }
+        val azimuths = FloatArray(sentBeams) { b.getFloat(4 + (sentBeams + it) * 4) }
+        // Adopt the shape before the renderer is told, so a frame arriving between the two is
+        // unpacked with the same geometry the renderer is about to draw it with.
+        beams = sentBeams
+        columns = sentColumns
+        received = 0
+        frameSequence = -1
+        say("$sentBeams beams x $sentColumns columns")
+        main.post { onGeometry(altitudes, azimuths, sentColumns) }
     }
 
     private fun acceptChunk(data: ByteArray) {
@@ -215,9 +237,9 @@ class CloudLink(private val context: Context) {
             frameSequence = sequence
         }
 
-        var point = firstColumn * BEAMS
+        var point = firstColumn * beams
         var i = 10
-        while (i + 1 < data.size && point < POINTS) {
+        while (i + 1 < data.size && point < points) {
             frame[point] = (((data[i].toInt() and 0xFF)) or
                     ((data[i + 1].toInt() and 0xFF) shl 8)).toShort()
             point++
