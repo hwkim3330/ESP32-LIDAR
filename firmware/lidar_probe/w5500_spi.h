@@ -49,6 +49,21 @@ struct W5500Spi {
   spi_host_device_t host;
   volatile uint32_t splitReads;    // how often the boundary was actually straddled
   volatile uint32_t failures;      // transactions that still failed, so this is not silent
+  volatile uint32_t savedByRetry;  // failed once, went through on a second identical attempt
+  volatile uint32_t savedByFold;   // only went through when the end-of-buffer offset became 0
+  volatile uint32_t lost;          // neither worked
+
+  // The last few reads before a failure, and every distinct failure rather than the first few.
+  //
+  // Both are corrections to how this was measured yesterday. The old print stopped after four
+  // lines, and the driver retries a failed read at the same address forever -- so four identical
+  // lines saying cmd 0x4000 may have been one event printed four times, which is not the evidence
+  // it was read as. And the lengths it showed (92, 700) never matched the ones the driver's own
+  // log showed (1434, 1514), which means the two were watching different failures entirely.
+  uint32_t history[8][3];          // cmd, addr, length
+  int historyAt;
+  uint32_t distinct[8][2];         // cmd, length of failures already reported
+  int distinctCount;
 };
 
 // The config the driver hands to init() is its own eth_w5500_config_t, which carries the host and
@@ -103,10 +118,33 @@ static esp_err_t w5500Transfer(W5500Spi *spi, uint32_t cmd, uint32_t addr, void 
   } else {
     trans.tx_buffer = data;
   }
+  spi->history[spi->historyAt][0] = cmd;
+  spi->history[spi->historyAt][1] = addr;
+  spi->history[spi->historyAt][2] = length;
+  spi->historyAt = (spi->historyAt + 1) % 8;
   const esp_err_t err = spi_device_polling_transmit(spi->handle, &trans);
   if (err == ESP_OK && reading && (trans.flags & SPI_TRANS_USE_RXDATA) && length <= 4)
     memcpy(data, trans.rx_data, length);
   return err;
+}
+
+// Only the first time a given (offset, length) fails, and with the reads that led up to it. A
+// failure that is the same read retried says nothing new; a failure at a new address does.
+static void reportFailure(W5500Spi *spi, uint32_t cmd, uint32_t length) {
+  for (int i = 0; i < spi->distinctCount; i++)
+    if (spi->distinct[i][0] == cmd && spi->distinct[i][1] == length) return;
+  if (spi->distinctCount >= 8) return;
+  spi->distinct[spi->distinctCount][0] = cmd;
+  spi->distinct[spi->distinctCount][1] = length;
+  spi->distinctCount++;
+
+  Serial.printf("spi read failed at cmd %lu len %lu; the eight reads before it:\n",
+                (unsigned long)cmd, (unsigned long)length);
+  for (int i = 0; i < 8; i++) {
+    const uint32_t *h = spi->history[(spi->historyAt + i) % 8];
+    Serial.printf("    cmd %6lu  addr 0x%02lx  len %5lu\n",
+                  (unsigned long)h[0], (unsigned long)h[1], (unsigned long)h[2]);
+  }
 }
 
 inline esp_err_t w5500SpiRead(void *context, uint32_t cmd, uint32_t addr, void *data,
@@ -135,14 +173,24 @@ inline esp_err_t w5500SpiRead(void *context, uint32_t cmd, uint32_t addr, void *
     err = w5500Transfer(spi, cmd, addr, data, length, true);
   }
 
-  if (err != ESP_OK) {
-    // The arguments, not a guess at them. The split above never fires while transactions keep
-    // failing, so one of the two things it tests is not what it is assumed to be, and printing
-    // them costs one line the first few times.
-    if (spi->failures < 4)
-      Serial.printf("spi read failed: cmd 0x%08lx (%lu) addr 0x%02lx len %lu\n",
-                    (unsigned long)cmd, (unsigned long)cmd, (unsigned long)addr,
-                    (unsigned long)length);
+  // Rescue the one read that fails, rather than changing every read that does not.
+  //
+  // Masking each offset into the buffer was tried and made things worse. But the failure is a
+  // single pointer value -- cmd 0x4000 exactly, every time -- so it can be handled where it
+  // happens instead. Two attempts, cheapest first, and both counted, because "it recovered" and
+  // "it recovered this way" are different facts and only the second one says what to build next.
+  if (err != ESP_OK && addr == kW5500SocketRxRead) {
+    spi->failures++;
+    reportFailure(spi, cmd, length);
+    err = w5500Transfer(spi, cmd, addr, data, length, true);       // the same read again
+    if (err == ESP_OK) {
+      spi->savedByRetry++;
+    } else {
+      err = w5500Transfer(spi, cmd & (kW5500RxBufferSize - 1), addr, data, length, true);
+      if (err == ESP_OK) spi->savedByFold++;
+      else spi->lost++;
+    }
+  } else if (err != ESP_OK) {
     spi->failures++;
   }
   xSemaphoreGive(spi->lock);

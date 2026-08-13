@@ -1435,8 +1435,11 @@ void loop() {
     // the sensor keeps sending at the same rate. So the second's worst gap goes out beside it.
     const HistoryBucket &last = history[(historyHead - 1 + kHistory) % kHistory];
     if (gW5500Spi)
-      Serial.printf("   spi: %lu boundary reads split, %lu transactions failed\n",
-                    (unsigned long)gW5500Spi->splitReads, (unsigned long)gW5500Spi->failures);
+      Serial.printf("   spi: %lu split, %lu failed -> %lu saved by retry, %lu by folding, "
+                    "%lu lost\n",
+                    (unsigned long)gW5500Spi->splitReads, (unsigned long)gW5500Spi->failures,
+                    (unsigned long)gW5500Spi->savedByRetry, (unsigned long)gW5500Spi->savedByFold,
+                    (unsigned long)gW5500Spi->lost);
     Serial.printf("link %s %uM %s | lidar %lu pkt %u/s (%u B, gap %lu us mean / %lu us max) | imu %lu\n",
                   ethLinkUp() ? "UP" : "DOWN", ethLinkSpeed(),
                   ethFullDuplex() ? "full" : "half", (unsigned long)lidar.packets, last.packets,
