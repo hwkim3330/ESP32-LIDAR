@@ -141,6 +141,17 @@ const char *kApPassword = "ketilidar";
 // A packet buffer big enough for a jumbo-ish lidar packet. Ouster's RNG19 profile on a 16
 // beam sensor is 3328 bytes of payload; anything larger than this gets truncated, which is
 // visible in the size histogram rather than silently wrong.
+// For the socket path only, where nothing exceeds an MTU. The reassembled path does not come
+// through here any more: an OS1-64 datagram is 32 + 16*(12 + 64*4) + 32 = 4352 bytes and this was
+// 4096, so every one of them was thrown away by a length check while the reassembler counted them
+// all as successes. The stream looked perfect from one side and did not exist from the other --
+// no packet count, no geometry, no cloud, and a watchdog re-applying a configuration to fix a
+// stream that had been arriving the whole time.
+//
+// Enlarging this was the obvious fix and it took the board out: another 4 kB of static DRAM left
+// BLE unable to create its queues at startup, which aborts in FreeRTOS rather than failing. So
+// the copy is gone instead. The decoder reads the reassembly slot directly, which it can, because
+// that slot belongs to this task until it hands it back.
 constexpr size_t kPacketBuffer = 4096;
 uint8_t packet[kPacketBuffer];
 
@@ -167,7 +178,9 @@ struct Flow {
 };
 Flow lidar, imu, scan;
 bool reassemblyPending = false;
+bool geometryPublished = false;
 W5500Spi *gW5500Spi = nullptr;
+uint32_t oversizeDatagrams = 0;   // datagrams too big for the packet buffer, counted not hidden
 uint32_t ethRestarts = 0;   // how often the receive path had to be brought back
 
 // One second of history per bucket, two minutes deep. Rate and jitter are computed here rather
@@ -487,10 +500,9 @@ void setup() {
   // the stream it was reassembling stops. Until the passthrough is right this costs more than it
   // buys, so it is a keypress ('R') rather than a default.
   onReassembled = acceptReassembled;
-  if (reassemblyPending) {
-    reassemblyBegin();
-    Serial.println("reassembly on (remembered)");
-  }
+  // Early, while internal memory is still plentiful. Taking the driver's input path happens after
+  // the beam angles are fetched, further down.
+  if (reassemblyPending) reassemblyStartTask();
 
   lidarUdp.begin(kLidarPort);
   imuUdp.begin(kImuPort);
@@ -520,6 +532,24 @@ void setup() {
   quietSince = bucketStart;
 
   cloudBleBegin("KETI-LIDAR-CLOUD");
+
+  // Geometry before reassembly, and this order is the whole point. The beam angles come over HTTP,
+  // and once reassembly owns the driver's input path a TCP reply cannot get through while the
+  // sensor is streaming -- `beam_intrinsics -11`, connection made, body never arriving. Standing
+  // aside for each attempt was tried and is worse: the retry runs every second, so the stream
+  // spends its life paused and drops from a thousand packets a second to seven.
+  //
+  // At boot there is no reassembly yet, so this is simply a request on an idle stack. It needs
+  // BLE up first because the angles are published as a characteristic the moment they arrive.
+  if (reassemblyPending) {
+    for (int attempt = 0; attempt < 5 && !geometryPublished; attempt++) {
+      geometryPublished = fetchBeamGeometry();
+      if (!geometryPublished) delay(800);
+    }
+    reassemblyBegin();
+    Serial.printf("reassembly on (remembered), geometry %s\n",
+                  geometryPublished ? "published" : "NOT published -- the app will draw nothing");
+  }
   Serial.println("BLE up as \"KETI-LIDAR-CLOUD\"");
 
   xTaskCreatePinnedToCore(serverTask, "http", 8192, nullptr, 1, nullptr, 0);
@@ -752,6 +782,7 @@ bool fetchSensorInfo() {
 // low-data-rate profile is roughly a tenth of that. Both are legitimate sensor modes -- nothing
 // here is a workaround, it is choosing an operating point the link can actually serve.
 bool configureSensor(const char *mode, const char *profile, bool remember) {
+  const ReassemblyPause quiet;
   if (remember) {
     streamRequested = true;
     requestedMode = mode;
@@ -822,6 +853,7 @@ void readPorts() {
 // its altitude angles at zero -- which puts every point at z = 0 and draws a room as a perfectly
 // flat disc. Thirty-two floats is 128 bytes and cannot be truncated.
 bool fetchBeamGeometry() {
+  const ReassemblyPause quiet;
   HTTPClient http;
   http.setTimeout(6000);
   if (!http.begin("http://" + kSensorAddress.toString() +
@@ -1335,11 +1367,19 @@ void serverTask(void *) {
 // A datagram that lwIP would have thrown away, arriving by the other door. Everything after this
 // point is the same as if a socket had returned it -- the decoder cannot tell, and should not.
 void acceptReassembled(const uint8_t *payload, int length, uint32_t sourceIp) {
-  if (length > int(kPacketBuffer)) return;
-  memcpy(packet, payload, length);
-  if (dumpNextPacket) { dumpNextPacket = false; decodePacket(packet, length); }
-  assembleColumns(packet, length);
-  recordArrival(lidar, length, IPAddress(__builtin_bswap32(sourceIp)), 7502, true);
+  // Learn where the sensor actually is from what it sends. Its address is configurable and has
+  // moved more than once on this bench, and a wrong one is invisible: UDP keeps arriving because
+  // the sensor pushes it, while every HTTP request to configure or to read the beam angles fails
+  // with -1. Taking it from the stream removes the one setting that could be stale.
+  const IPAddress from(__builtin_bswap32(sourceIp));
+  if (kSensorAddress != from) {
+    Serial.printf("sensor is at %s, not %s -- taking the address from its own packets\n",
+                  from.toString().c_str(), kSensorAddress.toString().c_str());
+    kSensorAddress = from;
+  }
+  if (dumpNextPacket) { dumpNextPacket = false; decodePacket(payload, length); }
+  assembleColumns(payload, length);
+  recordArrival(lidar, length, from, 7502, true);
 }
 
 void loop() {
@@ -1376,53 +1416,27 @@ void loop() {
       tasActive = 0;
     }
 
-    // Notice a wedged receive path and restart the MAC.
+    // The MAC-restart-and-reboot watchdog that used to live here is gone.
     //
-    // Everything arriving is counted here -- the sensor's packets, its IMU, and the fragments the
-    // reassembler sees -- because the wedge stops all of them at once. That is what distinguishes
-    // it from a sensor that has simply been unplugged: a quiet sensor leaves the board able to
-    // answer a ping, a wedged W5500 does not.
+    // It existed because the receive path wedged every twelve to twenty-six seconds and nothing
+    // above it noticed. That was the unaligned DMA in the driver's split read, and it is fixed in
+    // w5500_spi.h -- eighteen minutes and 341,910 datagrams without one stall.
     //
-    // Only after the board has seen traffic. Without that this would restart the MAC every two
-    // seconds on a bench where the sensor is off, which is a worse failure than the one it is
-    // for, and harder to recognise.
-    static uint32_t arrivedAtCheck = 0;
-    static int64_t arrivedChangedAt = 0;
-    static bool everArrived = false;
-    const uint32_t arrived = lidar.packets + imu.packets + fragmentsSeen;
-    if (arrived != arrivedAtCheck) {
-      arrivedAtCheck = arrived;
-      arrivedChangedAt = now;
-      if (arrived > 100) everArrived = true;
-    } else if (everArrived && gEthLinkUp && arrivedChangedAt &&
-               now - arrivedChangedAt > 2000000) {
-      arrivedChangedAt = now;
-      ethRestarts++;
-      Serial.printf("nothing has arrived for two seconds -- restarting the MAC (%lu)\n",
-                    (unsigned long)ethRestarts);
-      // The hook goes back on whatever the restart reports. It reported failure once while the
-      // link came back anyway, and the cost of that was the stream never returning: fragments
-      // went to lwIP, which drops them, while the IMU kept arriving and kept this watchdog quiet.
-      // A stream that is silently gone is worse than a hook re-registered for nothing.
-      ethRestart();
-      // Whatever the restart reports. It has reported failure while the link came back anyway,
-      // and the cost of skipping this was the stream never returning: fragments went to lwIP,
-      // which drops them, while the IMU kept arriving and kept this watchdog quiet.
-      reassemblyHook();
+    // Left in, it does harm. A restart is esp_eth_stop and esp_eth_start, which is shallow enough
+    // to leave the PHY where it was and deep enough to drop the link; when the cable itself is the
+    // reason nothing is arriving, the watchdog fires every two seconds and keeps it down. Which is
+    // what it did: 7,453 datagrams, then link DOWN, then restart 3, 4, 5 and no recovery.
+    //
+    // A quiet stream now means the sensor is quiet or the cable is out. Both are visible in the
+    // line below, and neither is improved by resetting anything.
 
-      // Escalate. A shallow restart clears the fault eventually but not reliably -- twenty-four
-      // of them over ninety seconds in one measured run -- and there is no deeper one available
-      // (see eth_w5500.h). Ten failures is fifteen seconds of nothing, by which point a two
-      // second reboot is the shorter outage.
-      if (ethRestarts % 10 == 0) {
-        Serial.println("ten restarts have not brought it back -- rebooting");
-        Serial.flush();
-        ESP.restart();
-      }
+    // Only if boot could not get it, and rarely: each attempt stops the stream for a moment, so
+    // trying every second costs more than the angles are worth once the picture is already drawn.
+    static int64_t lastGeometryTry = 0;
+    if (!geometryPublished && lidar.packets > 100 && now - lastGeometryTry > 30000000) {
+      lastGeometryTry = now;
+      geometryPublished = fetchBeamGeometry();
     }
-
-    static bool geometryPublished = false;
-    if (!geometryPublished && lidar.packets > 100) geometryPublished = fetchBeamGeometry();
 
     if (streamRequested && quietSince && now - quietSince > 20000000 &&
         now - lastReapply > 30000000) {
@@ -1434,6 +1448,9 @@ void loop() {
     // Mean alone hides what a shaper does: gating changes the spread, not the average, because
     // the sensor keeps sending at the same rate. So the second's worst gap goes out beside it.
     const HistoryBucket &last = history[(historyHead - 1 + kHistory) % kHistory];
+    if (oversizeDatagrams)
+      Serial.printf("   %lu datagrams were too big for the packet buffer\n",
+                    (unsigned long)oversizeDatagrams);
     if (gW5500Spi)
       Serial.printf("   spi: %lu folded, %lu bounced, %lu failed -> %lu retry, %lu fold, "
                     "%lu lost\n",
@@ -1455,11 +1472,11 @@ void loop() {
     cloudSendStatus(last.packets, last.meanInterval, last.maxInterval,
                     uint16_t(lastOutliers), ethLinkSpeed());
     if (fragmentsSeen)
-      Serial.printf("   heap %lu free (min %lu) | reassembled %lu datagrams from %lu fragments, %lu abandoned\n",
+      Serial.printf("   heap %lu free (min %lu) | reassembled %lu datagrams from %lu fragments, %lu abandoned, %lu dropped\n",
                     (unsigned long)esp_get_free_heap_size(),
                     (unsigned long)esp_get_minimum_free_heap_size(),
                     (unsigned long)datagramsCompleted, (unsigned long)fragmentsSeen,
-                    (unsigned long)datagramsAbandoned);
+                    (unsigned long)datagramsAbandoned, (unsigned long)datagramsDropped);
     Serial.printf("   gaps over %u us: %lu | min gap %lu us | burst %d%s | serve %ld us | house %ld us\n",
                   kOutlierThresholdUs, (unsigned long)lastOutliers,
                   (unsigned long)lastMinInterval, maxBurst,

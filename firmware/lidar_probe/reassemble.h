@@ -33,12 +33,24 @@ extern esp_eth_handle_t gEthHandle;
 //
 // So the callback fills a buffer and swaps it. A task on the other core does the work. The board
 // has two cores and this is what the second one is for.
+// A ring, not a pair. Two slots means the decoder has to finish one datagram before the next
+// completes, and at ninety a second it sometimes does not -- 263 reassembled, 157 dropped, with
+// nothing wrong but the handoff.
+//
+// Two, and it has to be two. These are static and therefore internal DRAM, which the radios also
+// want. Six slots is 48 kB: the board came up asserting inside the BLE controller and died on the
+// interrupt watchdog. Three is 24 kB: BLE init hangs, silently, right after the web server starts.
+// The megabytes this part advertises are PSRAM, and neither DMA nor a controller's queues can use
+// them. So the handoff gets one slot being filled and one being decoded, and the way to lose
+// fewer datagrams is to stop interrupting the decoder rather than to give it more room.
 constexpr int kMaxDatagram = 8192;
-uint8_t reassembleSlots[2][kMaxDatagram];
+constexpr int kSlots = 2;
+uint8_t reassembleSlots[kSlots][kMaxDatagram];
 int reassembleSlot = 0;
-volatile int readySlot = -1;
-volatile int readyLength = 0;
-volatile uint32_t readySource = 0;
+volatile int readyLength[kSlots] = {0};
+volatile uint32_t readySourceOf[kSlots] = {0};
+volatile bool slotReady[kSlots] = {false};
+volatile int nextToDecode = 0;
 volatile uint32_t datagramsDropped = 0;
 #define reassembled (reassembleSlots[reassembleSlot])
 int reassembledLength = 0;
@@ -48,13 +60,17 @@ bool reassemblyOpen = false;
 
 uint32_t fragmentsSeen = 0, datagramsCompleted = 0, datagramsAbandoned = 0;
 
+// Set while something above needs lwIP to see every frame. Declared here rather than beside its
+// helper because the input path is below and reads it on every frame.
+volatile bool reassemblyPaused = false;
+
 // Set by the sketch: what to do with a datagram once it is whole.
 void (*onReassembled)(const uint8_t *payload, int length, uint32_t sourceIp) = nullptr;
 uint16_t reassemblyPort = 7502;
 
 esp_err_t ethernetInput(esp_eth_handle_t handle, uint8_t *frame, uint32_t length, void *context) {
   // 14 byte Ethernet header, IPv4 only, and only the sensor's port. Everything else is lwIP's.
-  const bool isIpv4 = length > 34 && frame[12] == 0x08 && frame[13] == 0x00;
+  const bool isIpv4 = !reassemblyPaused && length > 34 && frame[12] == 0x08 && frame[13] == 0x00;
   if (isIpv4) {
     const uint8_t *ip = frame + 14;
     const int headerBytes = (ip[0] & 0x0F) * 4;
@@ -97,11 +113,12 @@ esp_err_t ethernetInput(esp_eth_handle_t handle, uint8_t *frame, uint32_t length
           // Hand it over and take the other slot. If the decoder has not finished with the last
           // one, this one is dropped -- late is worse than missing for a sensor that will send
           // another in three milliseconds, and stalling here is what wedged the driver before.
-          if (readySlot < 0) {
-            readyLength = reassembledLength - 8;
-            readySource = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
-            readySlot = reassembleSlot;
-            reassembleSlot ^= 1;
+          if (!slotReady[reassembleSlot]) {
+            readyLength[reassembleSlot] = reassembledLength - 8;
+            readySourceOf[reassembleSlot] =
+                (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
+            slotReady[reassembleSlot] = true;
+            reassembleSlot = (reassembleSlot + 1) % kSlots;
           } else {
             datagramsDropped++;
           }
@@ -118,14 +135,28 @@ esp_err_t ethernetInput(esp_eth_handle_t handle, uint8_t *frame, uint32_t length
 // of sleep when there is nothing, so the idle task still runs and the watchdog stays quiet.
 void reassemblyTask(void *) {
   for (;;) {
-    const int slot = readySlot;
-    if (slot < 0) { vTaskDelay(1); continue; }
-    if (onReassembled) onReassembled(reassembleSlots[slot] + 8, readyLength, readySource);
-    readySlot = -1;
+    const int slot = nextToDecode;
+    if (!slotReady[slot]) { vTaskDelay(1); continue; }
+    if (onReassembled)
+      onReassembled(reassembleSlots[slot] + 8, readyLength[slot], readySourceOf[slot]);
+    slotReady[slot] = false;
+    nextToDecode = (slot + 1) % kSlots;
   }
 }
 
 bool reassemblyActive = false;
+
+// Hand everything back to lwIP for a moment.
+//
+// Reassembly takes the driver's input path, and while the sensor is streaming that path is busy
+// enough that a TCP request to the sensor times out reading its reply -- `beam_intrinsics -11`,
+// with the connection made and the body never arriving. The beam angles are fetched exactly once
+// per boot and every point drawn depends on them, so it is worth standing aside for a second.
+// Fragments that arrive while paused are lost, which costs a frame of a room that is not moving.
+struct ReassemblyPause {
+  ReassemblyPause() { reassemblyPaused = true; vTaskDelay(pdMS_TO_TICKS(20)); }
+  ~ReassemblyPause() { reassemblyPaused = false; }
+};
 
 // Taking the driver's input path has to be redone after the driver is reinstalled, and it is
 // reinstalled whenever the receive path wedges. Without this the first recovery silently returns
@@ -134,10 +165,27 @@ inline void reassemblyHook() {
   if (reassemblyActive) esp_eth_update_input_path(gEthHandle, ethernetInput, nullptr);
 }
 
-inline void reassemblyBegin() {
-  if (!reassemblyActive) {
-    xTaskCreatePinnedToCore(reassemblyTask, "reassemble", 8192, nullptr, 3, nullptr, 1);
-    reassemblyActive = true;
+// Making the task and taking the input path are separate on purpose, and have to be.
+//
+// The task wants 8 kB of stack out of internal DRAM. Called after BLE is up, there is not enough
+// left and xTaskCreatePinnedToCore fails -- and nothing above it fails, so reassembly keeps
+// completing datagrams into a slot nobody ever empties. It reads as 63 reassembled and 62
+// dropped, with a healthy stream and a decoder that has never once run.
+//
+// So the task is made early, while the memory is there, and the path is taken later, after the
+// beam angles have been fetched over a stack that is still able to answer.
+inline bool reassemblyStartTask() {
+  if (reassemblyActive) return true;
+  const BaseType_t ok =
+      xTaskCreatePinnedToCore(reassemblyTask, "reassemble", 8192, nullptr, 3, nullptr, 1);
+  if (ok != pdPASS) {
+    Serial.println("reassembly task could not be created -- every datagram would be dropped");
+    return false;
   }
-  reassemblyHook();
+  reassemblyActive = true;
+  return true;
+}
+
+inline void reassemblyBegin() {
+  if (reassemblyStartTask()) reassemblyHook();
 }
