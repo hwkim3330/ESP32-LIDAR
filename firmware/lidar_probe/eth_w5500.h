@@ -83,7 +83,13 @@ inline bool ethStart(int sck, int miso, int mosi, int cs, int pollPeriodMs, cons
   // between 15014 and 16270 and nothing else ever failing. That is a wrap, not an overflow, and
   // a wrap is where a driver computes a second length that has to fit in one transaction.
   buscfg.max_transfer_sz = 20000;
-  if (spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) return false;
+  // Reported, not assumed. The one cause named in public reports of this driver's SPI failures is
+  // another device sharing the bus, and this board does share it: the boot probe drives the W5500
+  // directly over Arduino's SPI before handing it over. ESP_ERR_INVALID_STATE here would mean the
+  // bus was never actually released; ESP_OK means it was.
+  const esp_err_t busErr = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+  Serial.printf("spi bus init: %s\n", esp_err_to_name(busErr));
+  if (busErr != ESP_OK) return false;
 
   spi_device_interface_config_t devcfg = {};
   devcfg.mode = 0;
