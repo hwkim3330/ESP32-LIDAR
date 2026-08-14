@@ -52,6 +52,7 @@ struct W5500Spi {
   volatile uint32_t savedByRetry;  // failed once, went through on a second identical attempt
   volatile uint32_t savedByFold;   // only went through when the end-of-buffer offset became 0
   volatile uint32_t lost;          // neither worked
+  volatile uint32_t bounced;       // reads that had to land somewhere word aligned first
 
   // The last few reads before a failure, and every distinct failure rather than the first few.
   //
@@ -106,15 +107,33 @@ inline esp_err_t w5500SpiDeinit(void *context) {
 // One transaction, exactly as the driver's own does. Registers of four bytes or fewer use the
 // in-transaction buffer, because a DMA read of a few bytes can be overwritten by the four byte
 // boundary write that follows it -- the driver's comment, and worth keeping.
+// A word-aligned, DMA-capable landing place for reads whose destination is not.
+//
+// This is the fault, and it took printing the eight reads before each failure to see it. When a
+// frame straddles the end of the receive buffer the driver reads it in two parts, and the second
+// part lands at rx_buffer + (length of the first part). Those first-part lengths are 1370, 1098,
+// 1006, 1054, 1214, 214 -- every one of them 2 modulo 4, necessarily, because a frame begins just
+// after its own two byte header. So the destination pointer is never word aligned, and the SPI
+// master will not DMA into an unaligned buffer. It refuses the transaction, the driver has no
+// recovery, and the receive path is finished.
+//
+// It is invisible on ordinary traffic because it needs a frame to land across the buffer end,
+// which at 1500 bytes into 16 kB is about one pass in eleven. A sensor sending 960 full frames a
+// second gets there in seconds; a browser never does.
+alignas(4) static uint8_t gBounce[1600];
+
 static esp_err_t w5500Transfer(W5500Spi *spi, uint32_t cmd, uint32_t addr, void *data,
                                uint32_t length, bool reading) {
+  const bool bounce = reading && length > 4 && length <= sizeof(gBounce) &&
+                      ((uintptr_t)data & 3) != 0;
+  void *landing = bounce ? (void *)gBounce : data;
   spi_transaction_t trans = {};
   trans.cmd = cmd;
   trans.addr = addr;
   trans.length = 8 * length;
   if (reading) {
     trans.flags = length <= 4 ? SPI_TRANS_USE_RXDATA : 0;
-    trans.rx_buffer = data;
+    trans.rx_buffer = landing;
   } else {
     trans.tx_buffer = data;
   }
@@ -125,6 +144,10 @@ static esp_err_t w5500Transfer(W5500Spi *spi, uint32_t cmd, uint32_t addr, void 
   const esp_err_t err = spi_device_polling_transmit(spi->handle, &trans);
   if (err == ESP_OK && reading && (trans.flags & SPI_TRANS_USE_RXDATA) && length <= 4)
     memcpy(data, trans.rx_data, length);
+  if (err == ESP_OK && bounce) {
+    memcpy(data, gBounce, length);
+    spi->bounced++;
+  }
   return err;
 }
 
@@ -159,19 +182,33 @@ inline esp_err_t w5500SpiRead(void *context, uint32_t cmd, uint32_t addr, void *
   // The offset the driver passes is the socket's free-running read pointer, not an address -- it
   // counts past 16 kB and relies on the chip to mask it. So it is masked here before anything is
   // decided, or the boundary test would be asking about the wrong number.
-  // Masking the offset into the buffer was tried and measured worse -- 11% of the time delivering
-  // against 48% without it -- so the chip is left to fold its own pointer, as the driver intends.
-  // The address is passed through untouched and only a genuine straddle is split.
-  const uint32_t offset = cmd & (kW5500RxBufferSize - 1);
-  if (addr == kW5500SocketRxRead && offset != cmd && offset + length > kW5500RxBufferSize) {
-    const uint32_t first = kW5500RxBufferSize - offset;
+  // Fold the one address that is off the end, before the transfer rather than after it.
+  //
+  // The driver does handle a frame that straddles the end of the receive buffer -- it splits the
+  // read -- and the second half is issued at the wrong base. Caught in the act, with the eight
+  // reads leading up to every failure:
+  //
+  //     cmd  15012  addr 0x18  len     2      the frame header
+  //     cmd  15014  addr 0x18  len  1370      first half, ending at exactly 16384
+  //     cmd  16384  addr 0x18  len   144      second half -- and it fails
+  //
+  // 1370 + 144 is 1514. So is 1054 + 460, 1098 + 416, 1006 + 508, 1214 + 300: every pair is one
+  // frame cut at the buffer end. The remainder belongs at offset 0 and is asked for at 16384,
+  // which is one past the last address the buffer has.
+  //
+  // Rescuing it afterwards does not work -- retry and fold were both tried on the failed read and
+  // both failed, every time, because the first failure leaves the SPI device unable to complete
+  // anything. It has to be corrected before it is issued.
+  //
+  // Only addresses at or past the end are touched. An earlier attempt masked every socket read,
+  // which is a different and worse thing: the raw pointer the driver normally passes is meant to
+  // be folded by the chip, and WIZnet's own driver relies on that too.
+  uint32_t at = cmd;
+  if (addr == kW5500SocketRxRead && at >= kW5500RxBufferSize) {
+    at -= kW5500RxBufferSize;
     spi->splitReads++;
-    err = w5500Transfer(spi, cmd, addr, data, first, true);
-    if (err == ESP_OK)
-      err = w5500Transfer(spi, 0, addr, (uint8_t *)data + first, length - first, true);
-  } else {
-    err = w5500Transfer(spi, cmd, addr, data, length, true);
   }
+  err = w5500Transfer(spi, at, addr, data, length, true);
 
   // Rescue the one read that fails, rather than changing every read that does not.
   //
