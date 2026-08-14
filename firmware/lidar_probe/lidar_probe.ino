@@ -179,6 +179,7 @@ struct Flow {
 Flow lidar, imu, scan;
 bool reassemblyPending = false;
 bool geometryPublished = false;
+constexpr bool kBleEnabled = true;   // set false to measure the wire without the radio
 W5500Spi *gW5500Spi = nullptr;
 uint32_t oversizeDatagrams = 0;   // datagrams too big for the packet buffer, counted not hidden
 uint32_t ethRestarts = 0;   // how often the receive path had to be brought back
@@ -499,6 +500,7 @@ void setup() {
   // all, and about thirty seconds later the sensor's ARP entry for this board expires and even
   // the stream it was reassembling stops. Until the passthrough is right this costs more than it
   // buys, so it is a keypress ('R') rather than a default.
+  cloudAllocate();
   onReassembled = acceptReassembled;
   // Early, while internal memory is still plentiful. Taking the driver's input path happens after
   // the beam angles are fetched, further down.
@@ -531,7 +533,21 @@ void setup() {
   bucketStart = esp_timer_get_time();
   quietSince = bucketStart;
 
-  cloudBleBegin("KETI-LIDAR-CLOUD");
+  // Every task this sketch owns is made here, before the radios take the internal DRAM.
+  //
+  // This has now bitten three times, always the same way and always silently: a task created
+  // after cloudBleBegin cannot get its stack, xTaskCreatePinnedToCore returns pdFAIL, nothing
+  // checks it, and the feature is simply absent. The decoder dropped every datagram; the load
+  // generator reported zero frames a second at every SPI clock, which reads as a hardware
+  // ceiling and is a task that was never running.
+  if (xTaskCreatePinnedToCore(serverTask, "http", 8192, nullptr, 1, nullptr, 0) != pdPASS)
+    Serial.println("http task could not be created -- the web page will not answer");
+  loadBegin();
+
+  // Internal DRAM is the binding constraint on this board and BLE is by far the largest single
+  // claim on it. Off, the wire path can be measured without the radio deciding whether there is
+  // room for it; on, the tablet works. Both are needed, never at the same moment.
+  if (kBleEnabled) cloudBleBegin("KETI-LIDAR-CLOUD");
 
   // Geometry before reassembly, and this order is the whole point. The beam angles come over HTTP,
   // and once reassembly owns the driver's input path a TCP reply cannot get through while the
@@ -552,8 +568,6 @@ void setup() {
   }
   Serial.println("BLE up as \"KETI-LIDAR-CLOUD\"");
 
-  xTaskCreatePinnedToCore(serverTask, "http", 8192, nullptr, 1, nullptr, 0);
-  loadBegin();
   Serial.printf("FreeRTOS tick %u Hz -- one tick is %u ms, which is why HTTP is the task\n",
                 configTICK_RATE_HZ, 1000 / configTICK_RATE_HZ);
 }
@@ -899,7 +913,7 @@ bool fetchBeamGeometry() {
     const float v = angles[kCloudBeamsMax + b * sendBeamStride];
     memcpy(blob + n, &v, 4); n += 4;
   }
-  geometryCharacteristic->setValue(blob, n);
+  if (geometryCharacteristic) geometryCharacteristic->setValue(blob, n);
   Serial.printf("beam geometry: %d beams (%d sent, every %d), %d columns sent; "
                 "altitude %.2f..%.2f\n", kBeams, beamsSent, sendBeamStride, sendColumns,
                 angles[0], angles[kBeams - 1]);

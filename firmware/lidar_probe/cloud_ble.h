@@ -55,7 +55,22 @@ inline void cloudSetBeams(int beams) {
 constexpr int kChunkPoints = 240;    // 480 bytes of ranges + 6 byte header, inside a 517 MTU
 
 // Ranges in centimetres, indexed [column][beam]. Written by the packet path, read by the sender.
-uint16_t frameRanges[kCloudColumns][kCloudBeamsMax];
+//
+// In PSRAM, and it has to be. As a static array this is 64 kB of internal DRAM, and internal DRAM
+// is what BLE, the SPI DMA and every task stack compete for on this board -- with it in the way,
+// the radio asserts inside its own queue init and the board reboots before it ever reaches the
+// loop. Nothing DMAs into this and it is read once a second, so external memory costs it nothing.
+uint16_t (*frameRanges)[kCloudBeamsMax] = nullptr;
+
+inline bool cloudAllocate() {
+  frameRanges = (uint16_t (*)[kCloudBeamsMax])heap_caps_calloc(
+      kCloudColumns, kCloudBeamsMax * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+  if (!frameRanges) {
+    Serial.println("no PSRAM for the frame buffer -- the cloud will be empty");
+    return false;
+  }
+  return true;
+}
 volatile bool frameReady = false;
 uint32_t frameSequence = 0;
 

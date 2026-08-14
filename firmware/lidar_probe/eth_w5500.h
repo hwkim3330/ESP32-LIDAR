@@ -39,7 +39,7 @@
 // transmit to complete -- 1138 us of the 1438 a frame costs. So 40 reaches the ceiling with the
 // most margin below where the wiring gives up, and the switch's own FCS counter is the judge:
 // three minutes of load and not one corrupt frame.
-constexpr int kEthSpiMhz = 20;
+constexpr int kEthSpiMhz = 40;
 
 static esp_eth_handle_t gEthHandle = nullptr;
 static esp_netif_t *gEthNetif = nullptr;

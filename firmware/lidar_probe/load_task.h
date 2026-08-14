@@ -77,6 +77,8 @@ void loadTask(void *) {
   }
 }
 
-inline void loadBegin() {
-  xTaskCreatePinnedToCore(loadTask, "load", 4096, nullptr, 1, nullptr, 0);
+inline bool loadBegin() {
+  const BaseType_t ok = xTaskCreatePinnedToCore(loadTask, "load", 4096, nullptr, 1, nullptr, 0);
+  if (ok != pdPASS) Serial.println("load task could not be created -- 'l' will do nothing");
+  return ok == pdPASS;
 }
